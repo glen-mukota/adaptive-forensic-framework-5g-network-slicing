@@ -1,0 +1,68 @@
+{
+  "environmentName": "oai-two-slice-forensic-lab",
+  "upstreamRevision": "42bf80e9b25dbf521cc692fa6338cbbbebfbcd1d",
+  "oaiConfigurationRelativePath": "third_party/openairinterface5g/doc/tutorial_resources/oai-cn5g/conf/config.yaml",
+  "slices": [
+    {
+      "name": "eMBB baseline slice",
+      "sst": 1,
+      "sd": "FFFFFF",
+      "dnn": "oai",
+      "ueSubnet": "10.0.0.0/24",
+      "trafficProfile": "iperf3 throughput baseline"
+    },
+    {
+      "name": "mMTC evidence slice",
+      "sst": 3,
+      "sd": "FFFFFF",
+      "dnn": "mmtc",
+      "ueSubnet": "10.0.2.0/24",
+      "trafficProfile": "scripted low-rate session events"
+    }
+  ],
+  "evidenceSources": [
+    {
+      "id": "amf-log",
+      "kind": "amf-log",
+      "component": "oai-amf",
+      "collectionMethod": "container log export",
+      "expectedArtifact": "registration, mobility and slice-support events"
+    },
+    {
+      "id": "smf-log",
+      "kind": "smf-log",
+      "component": "oai-smf",
+      "collectionMethod": "container log export",
+      "expectedArtifact": "session-management and DNN selection events"
+    },
+    {
+      "id": "upf-log",
+      "kind": "upf-log",
+      "component": "oai-upf",
+      "collectionMethod": "container log export",
+      "expectedArtifact": "PFCP and user-plane forwarding events"
+    },
+    {
+      "id": "packet-metadata",
+      "kind": "packet-metadata",
+      "component": "N3/N4 observation point",
+      "collectionMethod": "approved tshark capture metadata",
+      "expectedArtifact": "timestamped control- and user-plane metadata"
+    },
+    {
+      "id": "experiment-ledger",
+      "kind": "experiment-metadata",
+      "component": "ForensicFramework.LabBootstrap",
+      "collectionMethod": "signed run manifest",
+      "expectedArtifact": "configuration hash, scenario identifier and environment record"
+    }
+  ],
+  "requiredServices": [
+    "mysql",
+    "oai-nrf",
+    "oai-amf",
+    "oai-smf",
+    "oai-upf",
+    "oai-ext-dn"
+  ]
+}

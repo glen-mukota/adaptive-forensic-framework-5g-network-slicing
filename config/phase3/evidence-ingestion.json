@@ -1,0 +1,194 @@
+{
+  "phase": "Phase 3 - normalised evidence ingestion",
+  "purpose": "Register the retained Phase 1 and Phase 2 laboratory artefacts as structured, queryable evidence records without modifying the original artefacts or making a slice-attribution, integrity, custody, or adaptive-control claim.",
+  "minimumRecordCount": 27,
+  "sources": [
+    {
+      "id": "P3-P1-CONTAINER-HEALTH",
+      "inputRun": "phase1",
+      "relativePath": "container-health.json",
+      "sourceKind": "container-health",
+      "sourceComponent": "OAI 5G core health evidence",
+      "networkFunction": "oai-core",
+      "scenarioId": "P1-BASELINE-CORE",
+      "preliminarySliceContext": null,
+      "expansion": "container-health"
+    },
+    {
+      "id": "P3-P1-NRF-REGISTRATION",
+      "inputRun": "phase1",
+      "relativePath": "nrf-registration-verification.txt",
+      "sourceKind": "network-function-registration",
+      "sourceComponent": "OAI NRF registration verification",
+      "networkFunction": "oai-nrf",
+      "scenarioId": "P1-BASELINE-CORE",
+      "preliminarySliceContext": null,
+      "expansion": "single"
+    },
+    {
+      "id": "P3-P1-BASELINE-SUMMARY",
+      "inputRun": "phase1",
+      "relativePath": "baseline-summary.json",
+      "sourceKind": "experiment-metadata",
+      "sourceComponent": "Phase 1 baseline summary",
+      "networkFunction": "laboratory-orchestrator",
+      "scenarioId": "P1-BASELINE-CORE",
+      "preliminarySliceContext": null,
+      "expansion": "single"
+    },
+    {
+      "id": "P3-P2-SCENARIO-LEDGER",
+      "inputRun": "phase2",
+      "relativePath": "scenario-ledger.json",
+      "sourceKind": "scenario-ground-truth",
+      "sourceComponent": "C# Phase 2 scenario ledger",
+      "networkFunction": "laboratory-orchestrator",
+      "scenarioId": null,
+      "preliminarySliceContext": null,
+      "expansion": "scenario-ledger"
+    },
+    {
+      "id": "P3-P2-EMBB-TUNNEL",
+      "inputRun": "phase2",
+      "relativePath": "P2-NORMAL-EMBB-001-tunnel.txt",
+      "sourceKind": "ue-session-event",
+      "sourceComponent": "eMBB virtual UE tunnel check",
+      "networkFunction": "phase2-oai-nr-ue-embb",
+      "scenarioId": "P2-NORMAL-EMBB-001",
+      "preliminarySliceContext": { "label": "eMBB baseline slice", "sst": 1, "sd": "FFFFFF", "dnn": "oai" },
+      "expansion": "single"
+    },
+    {
+      "id": "P3-P2-MMTC-TUNNEL",
+      "inputRun": "phase2",
+      "relativePath": "P2-NORMAL-MMTC-001-tunnel.txt",
+      "sourceKind": "ue-session-event",
+      "sourceComponent": "mMTC virtual UE tunnel check",
+      "networkFunction": "phase2-oai-nr-ue-mmtc",
+      "scenarioId": "P2-NORMAL-MMTC-001",
+      "preliminarySliceContext": { "label": "mMTC evidence slice", "sst": 3, "sd": "FFFFFF", "dnn": "mmtc" },
+      "expansion": "single"
+    },
+    {
+      "id": "P3-P2-EMBB-IPERF",
+      "inputRun": "phase2",
+      "relativePath": "P2-NORMAL-EMBB-001-iperf-client.txt",
+      "sourceKind": "user-plane-traffic",
+      "sourceComponent": "iperf UDP client evidence",
+      "networkFunction": "oai-ext-dn",
+      "scenarioId": "P2-NORMAL-EMBB-001",
+      "preliminarySliceContext": { "label": "eMBB baseline slice", "sst": 1, "sd": "FFFFFF", "dnn": "oai" },
+      "expansion": "single"
+    },
+    {
+      "id": "P3-P2-MMTC-IPERF",
+      "inputRun": "phase2",
+      "relativePath": "P2-NORMAL-MMTC-001-iperf-client.txt",
+      "sourceKind": "user-plane-traffic",
+      "sourceComponent": "iperf UDP client evidence",
+      "networkFunction": "oai-ext-dn",
+      "scenarioId": "P2-NORMAL-MMTC-001",
+      "preliminarySliceContext": { "label": "mMTC evidence slice", "sst": 3, "sd": "FFFFFF", "dnn": "mmtc" },
+      "expansion": "single"
+    },
+    {
+      "id": "P3-P2-GNB-LOG",
+      "inputRun": "phase2",
+      "relativePath": "logs/phase2-oai-gnb.log",
+      "sourceKind": "radio-access-log",
+      "sourceComponent": "OAI virtual gNB log",
+      "networkFunction": "phase2-oai-gnb",
+      "scenarioId": "P2-MULTI-SCENARIO",
+      "preliminarySliceContext": null,
+      "expansion": "single"
+    },
+    {
+      "id": "P3-P2-EMBB-UE-LOG",
+      "inputRun": "phase2",
+      "relativePath": "logs/phase2-oai-nr-ue-embb.log",
+      "sourceKind": "ue-session-event",
+      "sourceComponent": "eMBB virtual UE log",
+      "networkFunction": "phase2-oai-nr-ue-embb",
+      "scenarioId": "P2-NORMAL-EMBB-001",
+      "preliminarySliceContext": { "label": "eMBB baseline slice", "sst": 1, "sd": "FFFFFF", "dnn": "oai" },
+      "expansion": "single"
+    },
+    {
+      "id": "P3-P2-MMTC-UE-LOG",
+      "inputRun": "phase2",
+      "relativePath": "logs/phase2-oai-nr-ue-mmtc.log",
+      "sourceKind": "ue-session-event",
+      "sourceComponent": "mMTC virtual UE log",
+      "networkFunction": "phase2-oai-nr-ue-mmtc",
+      "scenarioId": "P2-NORMAL-MMTC-001",
+      "preliminarySliceContext": { "label": "mMTC evidence slice", "sst": 3, "sd": "FFFFFF", "dnn": "mmtc" },
+      "expansion": "single"
+    },
+    {
+      "id": "P3-P2-AMF-LOG",
+      "inputRun": "phase2",
+      "relativePath": "logs/oai-amf.log",
+      "sourceKind": "control-plane-log",
+      "sourceComponent": "OAI AMF log",
+      "networkFunction": "oai-amf",
+      "scenarioId": "P2-MULTI-SCENARIO",
+      "preliminarySliceContext": null,
+      "expansion": "single"
+    },
+    {
+      "id": "P3-P2-SMF-LOG",
+      "inputRun": "phase2",
+      "relativePath": "logs/oai-smf.log",
+      "sourceKind": "control-plane-log",
+      "sourceComponent": "OAI SMF log",
+      "networkFunction": "oai-smf",
+      "scenarioId": "P2-MULTI-SCENARIO",
+      "preliminarySliceContext": null,
+      "expansion": "single"
+    },
+    {
+      "id": "P3-P2-UPF-LOG",
+      "inputRun": "phase2",
+      "relativePath": "logs/oai-upf.log",
+      "sourceKind": "user-plane-log",
+      "sourceComponent": "OAI UPF log",
+      "networkFunction": "oai-upf",
+      "scenarioId": "P2-MULTI-SCENARIO",
+      "preliminarySliceContext": null,
+      "expansion": "single"
+    },
+    {
+      "id": "P3-P2-DOCKER-STATS-BEFORE",
+      "inputRun": "phase2",
+      "relativePath": "docker-stats-before.txt",
+      "sourceKind": "resource-metric",
+      "sourceComponent": "Docker resource snapshot before traffic",
+      "networkFunction": "docker-engine",
+      "scenarioId": "P2-MULTI-SCENARIO",
+      "preliminarySliceContext": null,
+      "expansion": "single"
+    },
+    {
+      "id": "P3-P2-DOCKER-STATS-AFTER",
+      "inputRun": "phase2",
+      "relativePath": "docker-stats-after.txt",
+      "sourceKind": "resource-metric",
+      "sourceComponent": "Docker resource snapshot after traffic",
+      "networkFunction": "docker-engine",
+      "scenarioId": "P2-MULTI-SCENARIO",
+      "preliminarySliceContext": null,
+      "expansion": "single"
+    },
+    {
+      "id": "P3-P2-RUN-SUMMARY",
+      "inputRun": "phase2",
+      "relativePath": "phase2-summary.json",
+      "sourceKind": "experiment-metadata",
+      "sourceComponent": "Phase 2 controlled-traffic summary",
+      "networkFunction": "laboratory-orchestrator",
+      "scenarioId": "P2-MULTI-SCENARIO",
+      "preliminarySliceContext": null,
+      "expansion": "single"
+    }
+  ]
+}

@@ -1,0 +1,44 @@
+{
+  "phase": "Phase 2 - virtual RAN connectivity and labelled controlled traffic",
+  "purpose": "Create reproducible, ground-truth traffic from distinct virtual UEs for the two approved slice profiles before forensic ingestion is implemented.",
+  "scenarios": [
+    {
+      "id": "P2-NORMAL-EMBB-001",
+      "sliceName": "eMBB baseline slice",
+      "sst": 1,
+      "sd": "FFFFFF",
+      "dnn": "oai",
+      "virtualUe": "phase2-oai-nr-ue-embb",
+      "tunnelAddress": "10.0.0.2",
+      "targetRateKbps": 1500,
+      "durationSeconds": 12,
+      "expectedArtifacts": [
+        "gNB NGAP connection event",
+        "AMF registration/session event",
+        "SMF PDU-session event for DNN oai",
+        "UPF user-plane forwarding event",
+        "iperf UDP traffic output",
+        "Docker resource snapshot"
+      ]
+    },
+    {
+      "id": "P2-NORMAL-MMTC-001",
+      "sliceName": "mMTC evidence slice",
+      "sst": 3,
+      "sd": "FFFFFF",
+      "dnn": "mmtc",
+      "virtualUe": "phase2-oai-nr-ue-mmtc",
+      "tunnelAddress": "10.0.2.2",
+      "targetRateKbps": 256,
+      "durationSeconds": 12,
+      "expectedArtifacts": [
+        "gNB NGAP connection event",
+        "AMF registration/session event",
+        "SMF PDU-session event for DNN mmtc",
+        "UPF user-plane forwarding event",
+        "iperf UDP traffic output",
+        "Docker resource snapshot"
+      ]
+    }
+  ]
+}

@@ -1,0 +1,7 @@
+artifacts/
+third_party/
+tmp/
+repair_phase2_report_evidence.py
+**/bin/
+**/obj/
+.vs/
