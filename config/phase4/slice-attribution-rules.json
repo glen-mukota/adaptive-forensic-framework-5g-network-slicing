@@ -1,0 +1,94 @@
+{
+  "phase": "Phase 4 - slice attribution and transparent rule logic",
+  "purpose": "Associate Phase 3 normalised evidence with the approved eMBB or mMTC laboratory slice only when an explicit, reviewable rule supports the decision. Preserve shared or incomplete records as ambiguous or unattributed rather than guessing.",
+  "slices": [
+    {
+      "id": "embb",
+      "name": "eMBB baseline slice",
+      "sliceType": "eMBB",
+      "sst": 1,
+      "sd": "FFFFFF",
+      "dnn": "oai"
+    },
+    {
+      "id": "mmtc",
+      "name": "mMTC evidence slice",
+      "sliceType": "mMTC",
+      "sst": 3,
+      "sd": "FFFFFF",
+      "dnn": "mmtc"
+    }
+  ],
+  "rules": [
+    {
+      "id": "P4-SCENARIO-EMBB",
+      "priority": 10,
+      "decision": "attributed",
+      "sliceId": "embb",
+      "usePreliminarySliceContext": false,
+      "candidateSliceIds": [],
+      "when": {
+        "scenarioId": "P2-NORMAL-EMBB-001",
+        "networkFunction": null,
+        "requirePreliminarySliceContext": null
+      },
+      "rationale": "The labelled eMBB ground-truth scenario maps to SST 1, SD FFFFFF and DNN oai."
+    },
+    {
+      "id": "P4-SCENARIO-MMTC",
+      "priority": 20,
+      "decision": "attributed",
+      "sliceId": "mmtc",
+      "usePreliminarySliceContext": false,
+      "candidateSliceIds": [],
+      "when": {
+        "scenarioId": "P2-NORMAL-MMTC-001",
+        "networkFunction": null,
+        "requirePreliminarySliceContext": null
+      },
+      "rationale": "The labelled mMTC ground-truth scenario maps to SST 3, SD FFFFFF and DNN mmtc."
+    },
+    {
+      "id": "P4-EXPLICIT-SNSSAI",
+      "priority": 30,
+      "decision": "attributed",
+      "sliceId": null,
+      "usePreliminarySliceContext": true,
+      "candidateSliceIds": [],
+      "when": {
+        "scenarioId": null,
+        "networkFunction": null,
+        "requirePreliminarySliceContext": true
+      },
+      "rationale": "A complete S-NSSAI and DNN context is matched exactly to one configured laboratory slice."
+    },
+    {
+      "id": "P4-SHARED-MULTI-SCENARIO",
+      "priority": 50,
+      "decision": "ambiguous",
+      "sliceId": null,
+      "usePreliminarySliceContext": false,
+      "candidateSliceIds": ["embb", "mmtc"],
+      "when": {
+        "scenarioId": "P2-MULTI-SCENARIO",
+        "networkFunction": null,
+        "requirePreliminarySliceContext": false
+      },
+      "rationale": "This shared gNB, core, resource or run-level record covers both controlled scenarios and has no slice-specific context, so it is retained as ambiguous."
+    },
+    {
+      "id": "P4-MISSING-SLICE-CONTEXT",
+      "priority": 100,
+      "decision": "unattributed",
+      "sliceId": null,
+      "usePreliminarySliceContext": false,
+      "candidateSliceIds": [],
+      "when": {
+        "scenarioId": null,
+        "networkFunction": null,
+        "requirePreliminarySliceContext": null
+      },
+      "rationale": "No approved scenario or complete slice context supports an assignment; the record remains unattributed."
+    }
+  ]
+}

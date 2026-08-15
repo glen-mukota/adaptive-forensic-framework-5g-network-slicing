@@ -38,6 +38,15 @@ internal static class Program
                 GetOption(args, "--network-function"),
                 GetOption(args, "--source-kind"),
                 GetOption(args, "--scenario")),
+            "attribute-slices" => WriteSliceAttributionReport(
+                GetOption(args, "--config") ?? Path.Combine(root, "config", "phase4", "slice-attribution-rules.json"),
+                GetOption(args, "--index"),
+                outputPath ?? Path.Combine(root, "artifacts", "phase4-attribution-report.json")),
+            "query-attribution" => QueryAttribution(
+                GetOption(args, "--report"),
+                GetOption(args, "--status"),
+                GetOption(args, "--rule-id"),
+                GetOption(args, "--scenario")),
             "help" or "--help" or "-h" => PrintHelp(),
             _ => Fail($"Unknown command '{command}'. Run 'help' to list supported commands.")
         };
@@ -52,6 +61,8 @@ internal static class Program
         Console.WriteLine("  scenario-ledger [--config <path>] [--output <path>]  Validate and write the Phase 2 ground-truth ledger.");
         Console.WriteLine("  ingest-evidence --phase1-run <path> --phase2-run <path> [--config <path>] [--output <path>]  Register normalised Phase 1/2 evidence records.");
         Console.WriteLine("  query-evidence --index <path> [--network-function <name>] [--source-kind <kind>] [--scenario <id>]  Retrieve indexed evidence records.");
+        Console.WriteLine("  attribute-slices --index <path> [--config <path>] [--output <path>]  Apply transparent Phase 4 slice-attribution rules.");
+        Console.WriteLine("  query-attribution --report <path> [--status <status>] [--rule-id <id>] [--scenario <id>]  Retrieve attribution decisions.");
         return 0;
     }
 
@@ -265,6 +276,267 @@ internal static class Program
         Console.WriteLine(JsonSerializer.Serialize(results, JsonOptions));
         return results.Length > 0 ? 0 : 2;
     }
+
+    private static int WriteSliceAttributionReport(string configPath, string? indexPath, string outputPath)
+    {
+        if (string.IsNullOrWhiteSpace(indexPath)) return Fail("attribute-slices requires --index <path>.");
+        if (!File.Exists(indexPath)) return Fail($"Evidence index not found: {Path.GetFullPath(indexPath)}");
+        if (!File.Exists(configPath)) return Fail($"Slice-attribution rules not found: {Path.GetFullPath(configPath)}");
+
+        EvidenceIndex? evidenceIndex;
+        SliceAttributionCatalog? catalog;
+        try
+        {
+            evidenceIndex = JsonSerializer.Deserialize<EvidenceIndex>(File.ReadAllText(indexPath), JsonOptions);
+            catalog = JsonSerializer.Deserialize<SliceAttributionCatalog>(File.ReadAllText(configPath), JsonOptions);
+        }
+        catch (JsonException error)
+        {
+            return Fail($"Invalid Phase 4 JSON: {error.Message}");
+        }
+
+        if (evidenceIndex?.Records is null || evidenceIndex.Records.Count == 0)
+        {
+            return Fail("Evidence index is empty or does not contain records.");
+        }
+
+        var errors = ValidateSliceAttributionCatalog(catalog);
+        if (errors.Count > 0)
+        {
+            foreach (var error in errors) Console.Error.WriteLine($"ATTRIBUTION_CONFIG_ERROR {error}");
+            return 1;
+        }
+
+        var attributedAt = DateTimeOffset.UtcNow;
+        var decisions = evidenceIndex.Records
+            .Select(record => AttributeRecord(record, catalog!, attributedAt))
+            .ToArray();
+
+        var groundTruthDecisions = decisions.Where(decision => HasCompleteSliceContext(decision.PreliminarySliceContext)).ToArray();
+        var correctGroundTruthDecisions = groundTruthDecisions.Where(decision =>
+            string.Equals(decision.DecisionStatus, "attributed", StringComparison.OrdinalIgnoreCase) &&
+            ContextsMatch(decision.PreliminarySliceContext, decision.AssignedSliceContext)).ToArray();
+        var accepted = groundTruthDecisions.Length > 0 &&
+            groundTruthDecisions.Length == correctGroundTruthDecisions.Length &&
+            decisions.Length == evidenceIndex.Records.Count &&
+            decisions.All(decision => !string.IsNullOrWhiteSpace(decision.RuleId));
+
+        var report = new SliceAttributionReport(
+            Phase: catalog!.Phase,
+            Purpose: catalog.Purpose,
+            AttributedAtUtc: attributedAt,
+            EvidenceIndexPath: Path.GetFullPath(indexPath),
+            EvidenceIndexSha256: ComputeSha256(indexPath),
+            AttributionRulesPath: Path.GetFullPath(configPath),
+            AttributionRulesSha256: ComputeSha256(configPath),
+            InputRecordCount: evidenceIndex.Records.Count,
+            DecisionCount: decisions.Length,
+            AttributedCount: decisions.Count(decision => string.Equals(decision.DecisionStatus, "attributed", StringComparison.OrdinalIgnoreCase)),
+            AmbiguousCount: decisions.Count(decision => string.Equals(decision.DecisionStatus, "ambiguous", StringComparison.OrdinalIgnoreCase)),
+            UnattributedCount: decisions.Count(decision => string.Equals(decision.DecisionStatus, "unattributed", StringComparison.OrdinalIgnoreCase)),
+            KnownGroundTruthDecisionCount: groundTruthDecisions.Length,
+            KnownGroundTruthCorrectCount: correctGroundTruthDecisions.Length,
+            KnownGroundTruthAccuracyPercent: groundTruthDecisions.Length == 0 ? 0 : Math.Round(correctGroundTruthDecisions.Length * 100.0 / groundTruthDecisions.Length, 2),
+            Accepted: accepted,
+            Decisions: decisions);
+
+        WriteJson(outputPath, report);
+        Console.WriteLine($"SLICE_ATTRIBUTION_REPORT_WRITTEN {Path.GetFullPath(outputPath)}");
+        if (!accepted)
+        {
+            return Fail("Phase 4 attribution acceptance checks did not pass.");
+        }
+
+        Console.WriteLine($"SLICE_ATTRIBUTION_VALID decisions={decisions.Length} groundTruth={groundTruthDecisions.Length} accuracy={report.KnownGroundTruthAccuracyPercent:F2}");
+        return 0;
+    }
+
+    private static int QueryAttribution(string? reportPath, string? status, string? ruleId, string? scenario)
+    {
+        if (string.IsNullOrWhiteSpace(reportPath)) return Fail("query-attribution requires --report <path>.");
+        if (!File.Exists(reportPath)) return Fail($"Attribution report not found: {Path.GetFullPath(reportPath)}");
+
+        SliceAttributionReport? report;
+        try
+        {
+            report = JsonSerializer.Deserialize<SliceAttributionReport>(File.ReadAllText(reportPath), JsonOptions);
+        }
+        catch (JsonException error)
+        {
+            return Fail($"Invalid attribution report JSON: {error.Message}");
+        }
+
+        if (report?.Decisions is null) return Fail("Attribution report is empty or does not contain decisions.");
+        var results = report.Decisions.Where(decision =>
+                (string.IsNullOrWhiteSpace(status) || string.Equals(decision.DecisionStatus, status, StringComparison.OrdinalIgnoreCase)) &&
+                (string.IsNullOrWhiteSpace(ruleId) || string.Equals(decision.RuleId, ruleId, StringComparison.OrdinalIgnoreCase)) &&
+                (string.IsNullOrWhiteSpace(scenario) || string.Equals(decision.ScenarioId, scenario, StringComparison.OrdinalIgnoreCase)))
+            .ToArray();
+
+        Console.WriteLine($"ATTRIBUTION_QUERY_MATCHES {results.Length}");
+        Console.WriteLine(JsonSerializer.Serialize(results, JsonOptions));
+        return results.Length > 0 ? 0 : 2;
+    }
+
+    private static IReadOnlyList<string> ValidateSliceAttributionCatalog(SliceAttributionCatalog? catalog)
+    {
+        var errors = new List<string>();
+        if (catalog is null)
+        {
+            errors.Add("Slice-attribution configuration is empty.");
+            return errors;
+        }
+
+        if (string.IsNullOrWhiteSpace(catalog.Phase)) errors.Add("phase is required.");
+        if (string.IsNullOrWhiteSpace(catalog.Purpose)) errors.Add("purpose is required.");
+        if (catalog.Slices is null || catalog.Slices.Length < 2) errors.Add("At least two configured slice contexts are required.");
+        if (catalog.Rules is null || catalog.Rules.Length == 0) errors.Add("At least one attribution rule is required.");
+
+        var sliceIds = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var snssai = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var slice in catalog.Slices ?? [])
+        {
+            if (string.IsNullOrWhiteSpace(slice.Id)) errors.Add("Each configured slice requires an id.");
+            else if (!sliceIds.Add(slice.Id)) errors.Add($"Duplicate configured slice id: {slice.Id}.");
+            if (string.IsNullOrWhiteSpace(slice.Name)) errors.Add($"Slice '{slice.Id}' requires a name.");
+            if (string.IsNullOrWhiteSpace(slice.SliceType)) errors.Add($"Slice '{slice.Id}' requires a sliceType.");
+            if (slice.Sst is < 0 or > 255) errors.Add($"Slice '{slice.Id}' has an invalid SST.");
+            if (!Regex.IsMatch(slice.Sd ?? string.Empty, "^[0-9A-Fa-f]{6}$")) errors.Add($"Slice '{slice.Id}' requires a six-digit hexadecimal SD.");
+            if (string.IsNullOrWhiteSpace(slice.Dnn)) errors.Add($"Slice '{slice.Id}' requires a DNN.");
+            if (!snssai.Add($"{slice.Sst}:{slice.Sd}:{slice.Dnn}")) errors.Add($"Duplicate configured S-NSSAI/DNN context for slice '{slice.Id}'.");
+        }
+
+        var ruleIds = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var priorities = new HashSet<int>();
+        foreach (var rule in catalog.Rules ?? [])
+        {
+            if (string.IsNullOrWhiteSpace(rule.Id)) errors.Add("Each attribution rule requires an id.");
+            else if (!ruleIds.Add(rule.Id)) errors.Add($"Duplicate attribution rule id: {rule.Id}.");
+            if (!priorities.Add(rule.Priority)) errors.Add($"Duplicate attribution rule priority: {rule.Priority}.");
+            if (string.IsNullOrWhiteSpace(rule.Rationale)) errors.Add($"Rule '{rule.Id}' requires a rationale.");
+            if (rule.Decision is not ("attributed" or "ambiguous" or "unattributed")) errors.Add($"Rule '{rule.Id}' has unsupported decision '{rule.Decision}'.");
+            if (string.Equals(rule.Decision, "attributed", StringComparison.OrdinalIgnoreCase) && string.IsNullOrWhiteSpace(rule.SliceId) && !rule.UsePreliminarySliceContext)
+            {
+                errors.Add($"Attributed rule '{rule.Id}' requires sliceId or usePreliminarySliceContext.");
+            }
+            if (!string.IsNullOrWhiteSpace(rule.SliceId) && !sliceIds.Contains(rule.SliceId)) errors.Add($"Rule '{rule.Id}' references unknown slice '{rule.SliceId}'.");
+            if (string.Equals(rule.Decision, "ambiguous", StringComparison.OrdinalIgnoreCase) && (rule.CandidateSliceIds is null || rule.CandidateSliceIds.Length < 2))
+            {
+                errors.Add($"Ambiguous rule '{rule.Id}' requires at least two candidateSliceIds.");
+            }
+            foreach (var candidate in rule.CandidateSliceIds ?? [])
+            {
+                if (!sliceIds.Contains(candidate)) errors.Add($"Rule '{rule.Id}' references unknown candidate slice '{candidate}'.");
+            }
+        }
+
+        return errors;
+    }
+
+    private static AttributionDecision AttributeRecord(NormalisedEvidenceRecord record, SliceAttributionCatalog catalog, DateTimeOffset attributedAt)
+    {
+        var rule = catalog.Rules!
+            .OrderBy(candidate => candidate.Priority)
+            .FirstOrDefault(candidate => RuleMatches(candidate.When, record));
+
+        if (rule is null)
+        {
+            return BuildAttributionDecision(record, attributedAt, "unattributed", "P4-NO-MATCH", "No configured rule matched the record; no slice is assigned.", null, []);
+        }
+
+        if (string.Equals(rule.Decision, "attributed", StringComparison.OrdinalIgnoreCase))
+        {
+            var assigned = ResolveAssignedSlice(rule, record, catalog.Slices!);
+            if (assigned is null)
+            {
+                var status = HasCompleteSliceContext(record.PreliminarySliceContext) ? "ambiguous" : "unattributed";
+                var safeguardId = HasCompleteSliceContext(record.PreliminarySliceContext) ? "P4-UNRECOGNISED-SNSSAI" : "P4-MISSING-SLICE-CONTEXT";
+                var safeguardReason = HasCompleteSliceContext(record.PreliminarySliceContext)
+                    ? "The supplied S-NSSAI/DNN context is not one of the configured laboratory slices; no assignment is made."
+                    : "The record has no complete S-NSSAI/DNN context for the selected rule; no assignment is made.";
+                return BuildAttributionDecision(record, attributedAt, status, safeguardId, safeguardReason, null, []);
+            }
+
+            if (HasCompleteSliceContext(record.PreliminarySliceContext) && !ContextsMatch(record.PreliminarySliceContext, assigned))
+            {
+                return BuildAttributionDecision(record, attributedAt, "ambiguous", "P4-CONTEXT-CONFLICT", $"Rule '{rule.Id}' selected a slice that conflicts with the record's supplied S-NSSAI/DNN context; no assignment is made.", null, [assigned]);
+            }
+
+            return BuildAttributionDecision(record, attributedAt, "attributed", rule.Id, rule.Rationale, assigned, []);
+        }
+
+        if (string.Equals(rule.Decision, "ambiguous", StringComparison.OrdinalIgnoreCase))
+        {
+            var candidates = (rule.CandidateSliceIds ?? [])
+                .Select(candidateId => catalog.Slices!.Single(slice => string.Equals(slice.Id, candidateId, StringComparison.OrdinalIgnoreCase)))
+                .Select(ToSliceContext)
+                .ToArray();
+            return BuildAttributionDecision(record, attributedAt, "ambiguous", rule.Id, rule.Rationale, null, candidates);
+        }
+
+        return BuildAttributionDecision(record, attributedAt, "unattributed", rule.Id, rule.Rationale, null, []);
+    }
+
+    private static bool RuleMatches(AttributionRuleCondition? condition, NormalisedEvidenceRecord record)
+    {
+        if (condition is null) return true;
+        if (!string.IsNullOrWhiteSpace(condition.ScenarioId) && !string.Equals(condition.ScenarioId, record.ScenarioId, StringComparison.OrdinalIgnoreCase)) return false;
+        if (!string.IsNullOrWhiteSpace(condition.NetworkFunction) && !string.Equals(condition.NetworkFunction, record.NetworkFunction, StringComparison.OrdinalIgnoreCase)) return false;
+        if (condition.RequirePreliminarySliceContext is true && !HasCompleteSliceContext(record.PreliminarySliceContext)) return false;
+        if (condition.RequirePreliminarySliceContext is false && HasCompleteSliceContext(record.PreliminarySliceContext)) return false;
+        return true;
+    }
+
+    private static AttributionSliceContext? ResolveAssignedSlice(AttributionRule rule, NormalisedEvidenceRecord record, AttributionSlice[] slices)
+    {
+        if (rule.UsePreliminarySliceContext)
+        {
+            var matchingSlice = slices.SingleOrDefault(slice => ContextsMatch(record.PreliminarySliceContext, ToSliceContext(slice)));
+            return matchingSlice is null ? null : ToSliceContext(matchingSlice);
+        }
+
+        var directSlice = slices.SingleOrDefault(slice => string.Equals(slice.Id, rule.SliceId, StringComparison.OrdinalIgnoreCase));
+        return directSlice is null ? null : ToSliceContext(directSlice);
+    }
+
+    private static AttributionDecision BuildAttributionDecision(NormalisedEvidenceRecord record, DateTimeOffset attributedAt, string decisionStatus, string ruleId, string rationale, AttributionSliceContext? assigned, IReadOnlyList<AttributionSliceContext> candidates) =>
+        new(
+            RecordId: record.RecordId,
+            AttributedAtUtc: attributedAt,
+            EvidenceTimestampUtc: record.EvidenceTimestampUtc,
+            NetworkFunction: record.NetworkFunction,
+            SourceKind: record.SourceKind,
+            ScenarioId: record.ScenarioId,
+            PreliminarySliceContext: record.PreliminarySliceContext,
+            AssignedSliceContext: assigned,
+            CandidateSliceContexts: candidates,
+            DecisionStatus: decisionStatus,
+            RuleId: ruleId,
+            Rationale: rationale,
+            DecisionInputs: BuildDecisionInputs(record));
+
+    private static string[] BuildDecisionInputs(NormalisedEvidenceRecord record) =>
+    [
+        $"recordId={record.RecordId}",
+        $"evidenceTimestampUtc={record.EvidenceTimestampUtc:O}",
+        $"networkFunction={record.NetworkFunction}",
+        $"scenarioId={record.ScenarioId ?? "not supplied"}",
+        HasCompleteSliceContext(record.PreliminarySliceContext)
+            ? $"preliminarySnssai=SST {record.PreliminarySliceContext!.Sst} / SD {record.PreliminarySliceContext.Sd} / DNN {record.PreliminarySliceContext.Dnn}"
+            : "preliminarySnssai=not complete"
+    ];
+
+    private static AttributionSliceContext ToSliceContext(AttributionSlice slice) =>
+        new(slice.Id, slice.Name, slice.SliceType, slice.Sst, slice.Sd, slice.Dnn);
+
+    private static bool HasCompleteSliceContext(PreliminarySliceContext? context) =>
+        context is not null && context.Sst.HasValue && !string.IsNullOrWhiteSpace(context.Sd) && !string.IsNullOrWhiteSpace(context.Dnn);
+
+    private static bool ContextsMatch(PreliminarySliceContext? preliminary, AttributionSliceContext? assigned) =>
+        HasCompleteSliceContext(preliminary) && assigned is not null &&
+        preliminary!.Sst == assigned.Sst &&
+        string.Equals(preliminary.Sd, assigned.Sd, StringComparison.OrdinalIgnoreCase) &&
+        string.Equals(preliminary.Dnn, assigned.Dnn, StringComparison.OrdinalIgnoreCase);
 
     private static IReadOnlyList<string> ValidateEvidenceIngestionCatalog(EvidenceIngestionCatalog? catalog)
     {
@@ -675,6 +947,77 @@ internal static class Program
         int SourceDefinitionCount,
         int RecordCount,
         IReadOnlyList<NormalisedEvidenceRecord> Records);
+
+    private sealed record SliceAttributionCatalog(
+        string Phase,
+        string Purpose,
+        AttributionSlice[] Slices,
+        AttributionRule[] Rules);
+
+    private sealed record AttributionSlice(
+        string Id,
+        string Name,
+        string SliceType,
+        int Sst,
+        string Sd,
+        string Dnn);
+
+    private sealed record AttributionRule(
+        string Id,
+        int Priority,
+        string Decision,
+        string? SliceId,
+        bool UsePreliminarySliceContext,
+        string[]? CandidateSliceIds,
+        AttributionRuleCondition? When,
+        string Rationale);
+
+    private sealed record AttributionRuleCondition(
+        string? ScenarioId,
+        string? NetworkFunction,
+        bool? RequirePreliminarySliceContext);
+
+    private sealed record AttributionSliceContext(
+        string SliceId,
+        string SliceName,
+        string SliceType,
+        int Sst,
+        string Sd,
+        string Dnn);
+
+    private sealed record AttributionDecision(
+        string RecordId,
+        DateTimeOffset AttributedAtUtc,
+        DateTimeOffset EvidenceTimestampUtc,
+        string NetworkFunction,
+        string SourceKind,
+        string? ScenarioId,
+        PreliminarySliceContext? PreliminarySliceContext,
+        AttributionSliceContext? AssignedSliceContext,
+        IReadOnlyList<AttributionSliceContext> CandidateSliceContexts,
+        string DecisionStatus,
+        string RuleId,
+        string Rationale,
+        IReadOnlyList<string> DecisionInputs);
+
+    private sealed record SliceAttributionReport(
+        string Phase,
+        string Purpose,
+        DateTimeOffset AttributedAtUtc,
+        string EvidenceIndexPath,
+        string EvidenceIndexSha256,
+        string AttributionRulesPath,
+        string AttributionRulesSha256,
+        int InputRecordCount,
+        int DecisionCount,
+        int AttributedCount,
+        int AmbiguousCount,
+        int UnattributedCount,
+        int KnownGroundTruthDecisionCount,
+        int KnownGroundTruthCorrectCount,
+        double KnownGroundTruthAccuracyPercent,
+        bool Accepted,
+        IReadOnlyList<AttributionDecision> Decisions);
 
     private sealed record ReadinessCheck(string Name, bool Passed, string Summary);
 
