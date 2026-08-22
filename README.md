@@ -8,6 +8,7 @@ COS700 research prototype for a contained OpenAirInterface (OAI) laboratory. The
 2. **Phase 2 - Virtual gNB/UE and controlled traffic:** RF-simulated gNB, two virtual NR-UEs, slice-specific tunnel addresses and reproducible UDP `iperf` ground-truth traffic.
 3. **Phase 3 - Normalised evidence ingestion:** C#/.NET registration of selected Phase 1/2 artifacts into a structured, queryable evidence index without changing original artifacts.
 4. **Phase 4 - Slice attribution and transparent rule logic:** C#/.NET decisions that associate labelled records with eMBB or mMTC using versioned rules, while preserving shared or incomplete records as ambiguous or unattributed.
+5. **Phase 5 - Approved adaptive collection, integrity and chain of custody:** C#/.NET applies an approved traffic-observation rule only to attributed slice evidence, calculates SHA-256 values, records complete custody metadata and re-verifies source hashes without changing original artifacts.
 
 ## Prerequisites
 
@@ -29,10 +30,11 @@ docker compose --project-name oai-two-slice-forensic-lab -f .\third_party\openai
 .\scripts\Run-Phase2ControlledTraffic.ps1
 .\scripts\Run-Phase3EvidenceIngestion.ps1
 .\scripts\Run-Phase4SliceAttribution.ps1
+.\scripts\Run-Phase5AdaptiveCollection.ps1
 ```
 
-Phase 4 outputs are stored in `artifacts/runs/phase4-<timestamp>/`. The `artifacts/`, `third_party/`, build output and local temporary files are intentionally excluded from Git.
+Phase 5 outputs are stored in `artifacts/runs/phase5-<timestamp>/`, including the approved-rule audit, custody ledger, SHA-256 verification report and adaptation-timing log. The `artifacts/`, `third_party/`, build output and local temporary files are intentionally excluded from Git.
 
 ## Research boundaries
 
-This is a research-only lab proof of concept. It uses no physical radio hardware, live operator network, real subscriber data, or production deployment. The repository does not yet claim completed evidence hashing / chain of custody, adaptive control or formal evaluation; those remain future stages in the approved implementation plan.
+This is a research-only lab proof of concept. It uses no physical radio hardware, live operator network, real subscriber data, or production deployment. The repository implements the approved-rule, SHA-256 and custody controls for controlled evidence references; formal evaluation across all planned scenarios remains a later stage in the approved implementation plan.

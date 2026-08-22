@@ -47,6 +47,14 @@ internal static class Program
                 GetOption(args, "--status"),
                 GetOption(args, "--rule-id"),
                 GetOption(args, "--scenario")),
+            "apply-adaptive-collection" => WriteAdaptiveCollectionReport(
+                GetOption(args, "--config") ?? Path.Combine(root, "config", "phase5", "adaptive-collection-rules.json"),
+                GetOption(args, "--attribution-report"),
+                outputPath ?? Path.Combine(root, "artifacts", "phase5-adaptive-collection-report.json")),
+            "query-adaptive-collection" => QueryAdaptiveCollection(
+                GetOption(args, "--report"),
+                GetOption(args, "--rule-id"),
+                GetOption(args, "--record-id")),
             "help" or "--help" or "-h" => PrintHelp(),
             _ => Fail($"Unknown command '{command}'. Run 'help' to list supported commands.")
         };
@@ -63,6 +71,8 @@ internal static class Program
         Console.WriteLine("  query-evidence --index <path> [--network-function <name>] [--source-kind <kind>] [--scenario <id>]  Retrieve indexed evidence records.");
         Console.WriteLine("  attribute-slices --index <path> [--config <path>] [--output <path>]  Apply transparent Phase 4 slice-attribution rules.");
         Console.WriteLine("  query-attribution --report <path> [--status <status>] [--rule-id <id>] [--scenario <id>]  Retrieve attribution decisions.");
+        Console.WriteLine("  apply-adaptive-collection --attribution-report <path> [--config <path>] [--output <path>]  Apply approved Phase 5 collection rules and create integrity/custody evidence.");
+        Console.WriteLine("  query-adaptive-collection --report <path> [--rule-id <id>] [--record-id <id>]  Retrieve Phase 5 rule and custody evidence.");
         return 0;
     }
 
@@ -378,6 +388,298 @@ internal static class Program
         return results.Length > 0 ? 0 : 2;
     }
 
+    private static int WriteAdaptiveCollectionReport(string configPath, string? attributionReportPath, string outputPath)
+    {
+        if (string.IsNullOrWhiteSpace(attributionReportPath)) return Fail("apply-adaptive-collection requires --attribution-report <path>.");
+        if (!File.Exists(attributionReportPath)) return Fail($"Attribution report not found: {Path.GetFullPath(attributionReportPath)}");
+        if (!File.Exists(configPath)) return Fail($"Adaptive-collection rules not found: {Path.GetFullPath(configPath)}");
+
+        SliceAttributionReport? attributionReport;
+        AdaptiveCollectionCatalog? catalog;
+        try
+        {
+            attributionReport = JsonSerializer.Deserialize<SliceAttributionReport>(File.ReadAllText(attributionReportPath), JsonOptions);
+            catalog = JsonSerializer.Deserialize<AdaptiveCollectionCatalog>(File.ReadAllText(configPath), JsonOptions);
+        }
+        catch (JsonException error)
+        {
+            return Fail($"Invalid Phase 5 JSON: {error.Message}");
+        }
+
+        if (attributionReport?.Decisions is null || attributionReport.Decisions.Count == 0)
+        {
+            return Fail("Attribution report is empty or does not contain decisions.");
+        }
+
+        if (!attributionReport.Accepted)
+        {
+            return Fail("The supplied Phase 4 attribution report did not pass its acceptance checks.");
+        }
+
+        var errors = ValidateAdaptiveCollectionCatalog(catalog);
+        if (errors.Count > 0)
+        {
+            foreach (var error in errors) Console.Error.WriteLine($"ADAPTIVE_COLLECTION_CONFIG_ERROR {error}");
+            return 1;
+        }
+
+        var approvedCatalog = catalog!;
+        var outputFullPath = Path.GetFullPath(outputPath);
+        var observedAt = DateTimeOffset.UtcNow;
+        var ruleApplications = ApplyApprovedCollectionRules(attributionReport.Decisions, approvedCatalog, observedAt);
+        var custodyLedger = BuildCustodyLedger(attributionReport.Decisions, approvedCatalog, outputFullPath);
+        var verificationResults = VerifyCustodyLedger(custodyLedger);
+        var completeCustodyCount = custodyLedger.Count(entry => HasCompleteCustodyMetadata(entry));
+        var allSourcesUnchanged = custodyLedger.All(entry => entry.SourceUnchangedDuringHash);
+        var allHashesMatch = verificationResults.All(result => result.SourceExists && result.HashMatches);
+        var applicationsAreApproved = ruleApplications.All(application => approvedCatalog.Rules!.Any(rule =>
+            string.Equals(rule.Id, application.RuleId, StringComparison.OrdinalIgnoreCase) && rule.Approved && rule.Enabled));
+        var accepted = ruleApplications.Count > 0 &&
+            applicationsAreApproved &&
+            completeCustodyCount == custodyLedger.Count &&
+            custodyLedger.Count == attributionReport.Decisions.Count &&
+            allSourcesUnchanged &&
+            allHashesMatch;
+
+        var report = new AdaptiveCollectionReport(
+            Phase: approvedCatalog.Phase,
+            Purpose: approvedCatalog.Purpose,
+            CollectedAtUtc: DateTimeOffset.UtcNow,
+            AttributionReportPath: Path.GetFullPath(attributionReportPath),
+            AttributionReportSha256: ComputeSha256(attributionReportPath),
+            AdaptiveRuleCatalogPath: Path.GetFullPath(configPath),
+            AdaptiveRuleCatalogSha256: ComputeSha256(configPath),
+            Collector: approvedCatalog.Collector,
+            IntegrityAlgorithm: approvedCatalog.IntegrityAlgorithm,
+            InputDecisionCount: attributionReport.Decisions.Count,
+            ApprovedRuleApplicationCount: ruleApplications.Count,
+            CustodyEntryCount: custodyLedger.Count,
+            CompleteCustodyEntryCount: completeCustodyCount,
+            VerifiedHashCount: verificationResults.Count(result => result.SourceExists && result.HashMatches),
+            TriggerToRuleUpdateLatencyMilliseconds: ruleApplications.Count == 0 ? 0 : ruleApplications.Max(application => application.AdaptationLatencyMilliseconds),
+            Accepted: accepted,
+            RuleApplications: ruleApplications,
+            CustodyLedger: custodyLedger,
+            HashVerificationResults: verificationResults);
+
+        WriteJson(outputFullPath, report);
+        Console.WriteLine($"ADAPTIVE_COLLECTION_REPORT_WRITTEN {outputFullPath}");
+        if (!accepted)
+        {
+            return Fail("Phase 5 adaptive collection, integrity and custody acceptance checks did not pass.");
+        }
+
+        Console.WriteLine($"ADAPTIVE_COLLECTION_VALID applications={ruleApplications.Count} custody={custodyLedger.Count} hashes={report.VerifiedHashCount}");
+        return 0;
+    }
+
+    private static int QueryAdaptiveCollection(string? reportPath, string? ruleId, string? recordId)
+    {
+        if (string.IsNullOrWhiteSpace(reportPath)) return Fail("query-adaptive-collection requires --report <path>.");
+        if (!File.Exists(reportPath)) return Fail($"Adaptive collection report not found: {Path.GetFullPath(reportPath)}");
+
+        AdaptiveCollectionReport? report;
+        try
+        {
+            report = JsonSerializer.Deserialize<AdaptiveCollectionReport>(File.ReadAllText(reportPath), JsonOptions);
+        }
+        catch (JsonException error)
+        {
+            return Fail($"Invalid adaptive collection report JSON: {error.Message}");
+        }
+
+        if (report?.CustodyLedger is null || report.RuleApplications is null)
+        {
+            return Fail("Adaptive collection report is empty or incomplete.");
+        }
+
+        var applications = report.RuleApplications
+            .Where(application => string.IsNullOrWhiteSpace(ruleId) || string.Equals(application.RuleId, ruleId, StringComparison.OrdinalIgnoreCase))
+            .ToArray();
+        var entries = report.CustodyLedger
+            .Where(entry => string.IsNullOrWhiteSpace(recordId) || string.Equals(entry.RecordId, recordId, StringComparison.OrdinalIgnoreCase))
+            .ToArray();
+        Console.WriteLine($"ADAPTIVE_RULE_QUERY_MATCHES {applications.Length}");
+        Console.WriteLine($"CUSTODY_QUERY_MATCHES {entries.Length}");
+        Console.WriteLine(JsonSerializer.Serialize(new { applications, entries }, JsonOptions));
+        return applications.Length > 0 || entries.Length > 0 ? 0 : 2;
+    }
+
+    private static IReadOnlyList<string> ValidateAdaptiveCollectionCatalog(AdaptiveCollectionCatalog? catalog)
+    {
+        var errors = new List<string>();
+        if (catalog is null)
+        {
+            errors.Add("Adaptive-collection configuration is empty.");
+            return errors;
+        }
+
+        if (string.IsNullOrWhiteSpace(catalog.Phase)) errors.Add("phase is required.");
+        if (string.IsNullOrWhiteSpace(catalog.Purpose)) errors.Add("purpose is required.");
+        if (string.IsNullOrWhiteSpace(catalog.Collector)) errors.Add("collector is required.");
+        if (!string.Equals(catalog.IntegrityAlgorithm, "SHA-256", StringComparison.OrdinalIgnoreCase)) errors.Add("integrityAlgorithm must be SHA-256.");
+        var requiredFields = new[] { "source", "collector", "action", "timestamp", "hash", "storageLocation" };
+        foreach (var field in requiredFields)
+        {
+            if (catalog.RequiredCustodyFields is null || !catalog.RequiredCustodyFields.Contains(field, StringComparer.OrdinalIgnoreCase))
+            {
+                errors.Add($"requiredCustodyFields must include '{field}'.");
+            }
+        }
+
+        if (catalog.Rules is null || catalog.Rules.Length == 0)
+        {
+            errors.Add("At least one adaptive collection rule is required.");
+            return errors;
+        }
+
+        var ids = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var priorities = new HashSet<int>();
+        var approvedRuleCount = 0;
+        foreach (var rule in catalog.Rules)
+        {
+            if (string.IsNullOrWhiteSpace(rule.Id)) errors.Add("Each adaptive rule requires an id.");
+            else if (!ids.Add(rule.Id)) errors.Add($"Duplicate adaptive rule id: {rule.Id}.");
+            if (!priorities.Add(rule.Priority)) errors.Add($"Duplicate adaptive rule priority: {rule.Priority}.");
+            if (string.IsNullOrWhiteSpace(rule.Rationale)) errors.Add($"Rule '{rule.Id}' requires a rationale.");
+            if (rule.Trigger is null) errors.Add($"Rule '{rule.Id}' requires a trigger.");
+            else
+            {
+                if (string.IsNullOrWhiteSpace(rule.Trigger.EventType)) errors.Add($"Rule '{rule.Id}' trigger requires an eventType.");
+                if (rule.Trigger.SourceKinds is null || rule.Trigger.SourceKinds.Length == 0) errors.Add($"Rule '{rule.Id}' trigger requires sourceKinds.");
+                if (rule.Trigger.MinimumAttributedRecordCount <= 0) errors.Add($"Rule '{rule.Id}' trigger requires a positive minimumAttributedRecordCount.");
+            }
+            if (rule.Action is null) errors.Add($"Rule '{rule.Id}' requires an action.");
+            else
+            {
+                if (rule.Action.CollectionPriority is not ("baseline" or "elevated" or "high")) errors.Add($"Rule '{rule.Id}' has unsupported collectionPriority '{rule.Action.CollectionPriority}'.");
+                if (rule.Action.SourceKinds is null || rule.Action.SourceKinds.Length == 0) errors.Add($"Rule '{rule.Id}' action requires sourceKinds.");
+                if (string.IsNullOrWhiteSpace(rule.Action.Description)) errors.Add($"Rule '{rule.Id}' action requires a description.");
+            }
+            if (rule.Approved && rule.Enabled) approvedRuleCount++;
+        }
+
+        if (approvedRuleCount == 0) errors.Add("At least one enabled, approved adaptive collection rule is required.");
+        return errors;
+    }
+
+    private static IReadOnlyList<AdaptiveRuleApplication> ApplyApprovedCollectionRules(
+        IReadOnlyList<AttributionDecision> decisions,
+        AdaptiveCollectionCatalog catalog,
+        DateTimeOffset observedAt)
+    {
+        var applications = new List<AdaptiveRuleApplication>();
+        foreach (var rule in catalog.Rules!
+                     .Where(candidate => candidate.Approved && candidate.Enabled)
+                     .OrderBy(candidate => candidate.Priority))
+        {
+            var matching = decisions.Where(decision =>
+                    string.Equals(decision.DecisionStatus, "attributed", StringComparison.OrdinalIgnoreCase) &&
+                    decision.AssignedSliceContext is not null &&
+                    rule.Trigger!.SourceKinds!.Contains(decision.SourceKind, StringComparer.OrdinalIgnoreCase))
+                .ToArray();
+
+            var groups = rule.Trigger.RequireAssignedSlice
+                ? matching.GroupBy(decision => decision.AssignedSliceContext!.SliceId, StringComparer.OrdinalIgnoreCase)
+                : matching.GroupBy(_ => "all-slices", StringComparer.OrdinalIgnoreCase);
+            foreach (var group in groups.Where(candidate => candidate.Count() >= rule.Trigger.MinimumAttributedRecordCount))
+            {
+                var updatedAt = DateTimeOffset.UtcNow;
+                applications.Add(new AdaptiveRuleApplication(
+                    RuleId: rule.Id,
+                    EventType: rule.Trigger.EventType,
+                    SliceId: rule.Trigger.RequireAssignedSlice ? group.Key : null,
+                    TriggerObservedAtUtc: observedAt,
+                    RuleUpdatedAtUtc: updatedAt,
+                    AdaptationLatencyMilliseconds: Math.Max(0, (long)(updatedAt - observedAt).TotalMilliseconds),
+                    EvidenceRecordIds: group.Select(decision => decision.RecordId).OrderBy(id => id, StringComparer.Ordinal).ToArray(),
+                    CollectionPriority: rule.Action!.CollectionPriority,
+                    PrioritisedSourceKinds: rule.Action.SourceKinds!,
+                    Rationale: rule.Rationale));
+            }
+        }
+
+        return applications;
+    }
+
+    private static IReadOnlyList<CustodyEntry> BuildCustodyLedger(
+        IReadOnlyList<AttributionDecision> decisions,
+        AdaptiveCollectionCatalog catalog,
+        string storageLocation)
+    {
+        var entries = new List<CustodyEntry>();
+        string? previousEntrySha256 = null;
+        var sequence = 0;
+        foreach (var decision in decisions.OrderBy(decision => decision.RecordId, StringComparer.Ordinal))
+        {
+            sequence++;
+            var sourcePath = decision.SourceReference;
+            if (!File.Exists(sourcePath))
+            {
+                throw new FileNotFoundException($"Evidence source referenced by '{decision.RecordId}' is unavailable.", sourcePath);
+            }
+
+            var before = new FileInfo(sourcePath);
+            var sizeBefore = before.Length;
+            var writeBefore = before.LastWriteTimeUtc;
+            var sha256 = ComputeSha256(sourcePath);
+            var after = new FileInfo(sourcePath);
+            var unchangedDuringHash = sizeBefore == after.Length && writeBefore == after.LastWriteTimeUtc;
+            if (!unchangedDuringHash)
+            {
+                throw new InvalidOperationException($"Evidence source changed while SHA-256 was calculated: {sourcePath}");
+            }
+
+            var timestamp = DateTimeOffset.UtcNow;
+            var action = "Acquired read-only reference, calculated SHA-256 and registered custody metadata.";
+            var entryMaterial = string.Join("|", sequence, decision.RecordId, sourcePath, catalog.Collector, action, timestamp.ToString("O"), sha256, storageLocation, previousEntrySha256 ?? string.Empty);
+            var entrySha256 = ComputeTextSha256(entryMaterial);
+            entries.Add(new CustodyEntry(
+                Sequence: sequence,
+                RecordId: decision.RecordId,
+                SourceReference: sourcePath,
+                Collector: catalog.Collector,
+                Action: action,
+                TimestampUtc: timestamp,
+                Sha256: sha256,
+                ArtifactSizeBytes: sizeBefore,
+                StorageLocation: storageLocation,
+                PreviousEntrySha256: previousEntrySha256,
+                EntrySha256: entrySha256,
+                SourceUnchangedDuringHash: unchangedDuringHash));
+            previousEntrySha256 = entrySha256;
+        }
+
+        return entries;
+    }
+
+    private static IReadOnlyList<HashVerificationResult> VerifyCustodyLedger(IReadOnlyList<CustodyEntry> custodyLedger)
+    {
+        return custodyLedger.Select(entry =>
+        {
+            var sourceExists = File.Exists(entry.SourceReference);
+            var actualSha256 = sourceExists ? ComputeSha256(entry.SourceReference) : string.Empty;
+            return new HashVerificationResult(
+                RecordId: entry.RecordId,
+                SourceReference: entry.SourceReference,
+                ExpectedSha256: entry.Sha256,
+                ActualSha256: actualSha256,
+                HashMatches: sourceExists && string.Equals(entry.Sha256, actualSha256, StringComparison.OrdinalIgnoreCase),
+                VerifiedAtUtc: DateTimeOffset.UtcNow,
+                ArtifactSizeBytes: sourceExists ? new FileInfo(entry.SourceReference).Length : 0,
+                SourceExists: sourceExists);
+        }).ToArray();
+    }
+
+    private static bool HasCompleteCustodyMetadata(CustodyEntry entry) =>
+        !string.IsNullOrWhiteSpace(entry.SourceReference) &&
+        !string.IsNullOrWhiteSpace(entry.Collector) &&
+        !string.IsNullOrWhiteSpace(entry.Action) &&
+        entry.TimestampUtc != default &&
+        !string.IsNullOrWhiteSpace(entry.Sha256) &&
+        !string.IsNullOrWhiteSpace(entry.StorageLocation) &&
+        !string.IsNullOrWhiteSpace(entry.EntrySha256);
+
     private static IReadOnlyList<string> ValidateSliceAttributionCatalog(SliceAttributionCatalog? catalog)
     {
         var errors = new List<string>();
@@ -502,6 +804,7 @@ internal static class Program
     private static AttributionDecision BuildAttributionDecision(NormalisedEvidenceRecord record, DateTimeOffset attributedAt, string decisionStatus, string ruleId, string rationale, AttributionSliceContext? assigned, IReadOnlyList<AttributionSliceContext> candidates) =>
         new(
             RecordId: record.RecordId,
+            SourceReference: record.SourceReference,
             AttributedAtUtc: attributedAt,
             EvidenceTimestampUtc: record.EvidenceTimestampUtc,
             NetworkFunction: record.NetworkFunction,
@@ -809,6 +1112,9 @@ internal static class Program
         return Convert.ToHexString(sha256.ComputeHash(stream));
     }
 
+    private static string ComputeTextSha256(string text) =>
+        Convert.ToHexString(SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(text)));
+
     private static void WriteJson<T>(string outputPath, T value)
     {
         var directory = Path.GetDirectoryName(Path.GetFullPath(outputPath));
@@ -987,6 +1293,7 @@ internal static class Program
 
     private sealed record AttributionDecision(
         string RecordId,
+        string SourceReference,
         DateTimeOffset AttributedAtUtc,
         DateTimeOffset EvidenceTimestampUtc,
         string NetworkFunction,
@@ -1018,6 +1325,91 @@ internal static class Program
         double KnownGroundTruthAccuracyPercent,
         bool Accepted,
         IReadOnlyList<AttributionDecision> Decisions);
+
+    private sealed record AdaptiveCollectionCatalog(
+        string Phase,
+        string Purpose,
+        string Collector,
+        string IntegrityAlgorithm,
+        string[] RequiredCustodyFields,
+        AdaptiveCollectionRule[] Rules);
+
+    private sealed record AdaptiveCollectionRule(
+        string Id,
+        int Priority,
+        bool Approved,
+        bool Enabled,
+        AdaptiveCollectionTrigger Trigger,
+        AdaptiveCollectionAction Action,
+        string Rationale);
+
+    private sealed record AdaptiveCollectionTrigger(
+        string EventType,
+        string[] SourceKinds,
+        int MinimumAttributedRecordCount,
+        bool RequireAssignedSlice);
+
+    private sealed record AdaptiveCollectionAction(
+        string CollectionPriority,
+        string[] SourceKinds,
+        string Description);
+
+    private sealed record AdaptiveRuleApplication(
+        string RuleId,
+        string EventType,
+        string? SliceId,
+        DateTimeOffset TriggerObservedAtUtc,
+        DateTimeOffset RuleUpdatedAtUtc,
+        long AdaptationLatencyMilliseconds,
+        IReadOnlyList<string> EvidenceRecordIds,
+        string CollectionPriority,
+        IReadOnlyList<string> PrioritisedSourceKinds,
+        string Rationale);
+
+    private sealed record CustodyEntry(
+        int Sequence,
+        string RecordId,
+        string SourceReference,
+        string Collector,
+        string Action,
+        DateTimeOffset TimestampUtc,
+        string Sha256,
+        long ArtifactSizeBytes,
+        string StorageLocation,
+        string? PreviousEntrySha256,
+        string EntrySha256,
+        bool SourceUnchangedDuringHash);
+
+    private sealed record HashVerificationResult(
+        string RecordId,
+        string SourceReference,
+        string ExpectedSha256,
+        string ActualSha256,
+        bool HashMatches,
+        DateTimeOffset VerifiedAtUtc,
+        long ArtifactSizeBytes,
+        bool SourceExists);
+
+    private sealed record AdaptiveCollectionReport(
+        string Phase,
+        string Purpose,
+        DateTimeOffset CollectedAtUtc,
+        string AttributionReportPath,
+        string AttributionReportSha256,
+        string AdaptiveRuleCatalogPath,
+        string AdaptiveRuleCatalogSha256,
+        string Collector,
+        string IntegrityAlgorithm,
+        int InputDecisionCount,
+        int ApprovedRuleApplicationCount,
+        int CustodyEntryCount,
+        int CompleteCustodyEntryCount,
+        int VerifiedHashCount,
+        long TriggerToRuleUpdateLatencyMilliseconds,
+        bool Accepted,
+        IReadOnlyList<AdaptiveRuleApplication> RuleApplications,
+        IReadOnlyList<CustodyEntry> CustodyLedger,
+        IReadOnlyList<HashVerificationResult> HashVerificationResults);
 
     private sealed record ReadinessCheck(string Name, bool Passed, string Summary);
 

@@ -1,0 +1,40 @@
+{
+  "phase": "Phase 5 - approved adaptive collection, integrity and chain of custody",
+  "purpose": "Safely increase the collection priority only when a documented, approved rule observes attributed controlled traffic. Preserve each registered source through SHA-256 hashing, complete custody metadata and immediate retrieval verification without altering the original source artifact.",
+  "collector": "Adaptive forensic framework research prototype",
+  "integrityAlgorithm": "SHA-256",
+  "requiredCustodyFields": [
+    "source",
+    "collector",
+    "action",
+    "timestamp",
+    "hash",
+    "storageLocation"
+  ],
+  "rules": [
+    {
+      "id": "P5-APPROVED-TRAFFIC-PRIORITY",
+      "priority": 10,
+      "approved": true,
+      "enabled": true,
+      "trigger": {
+        "eventType": "attributed-controlled-traffic-observed",
+        "sourceKinds": [
+          "user-plane-traffic"
+        ],
+        "minimumAttributedRecordCount": 1,
+        "requireAssignedSlice": true
+      },
+      "action": {
+        "collectionPriority": "elevated",
+        "sourceKinds": [
+          "user-plane-traffic",
+          "ue-session-event",
+          "control-plane-log"
+        ],
+        "description": "Prioritise the slice-specific traffic, UE-session and control-plane evidence references for the attributed slice."
+      },
+      "rationale": "A labelled, attributed controlled-traffic observation is the approved laboratory signal for a load-related collection-priority update. Shared and unattributed records do not trigger this rule."
+    }
+  ]
+}
