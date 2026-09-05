@@ -1,0 +1,97 @@
+{
+  "phase": "Phase 6 - controlled evaluation and refinement",
+  "purpose": "Evaluate the completed laboratory prototype against predefined ground truth. Measure attribution accuracy, normal-operation collection completeness, integrity verification, custody completeness, adaptation latency and observed resource change without altering the retained Phase 1 to Phase 5 evidence.",
+  "scenarios": [
+    {
+      "id": "P6-NORMAL-SLICE-OPERATION",
+      "type": "normal-slice-operation",
+      "purpose": "Confirm that both labelled laboratory slices produce the expected normal-operation evidence and receive correct slice attribution.",
+      "minimumEvidenceItems": 4,
+      "scenarioIds": [
+        "P2-NORMAL-EMBB-001",
+        "P2-NORMAL-MMTC-001"
+      ],
+      "expectedDecisionStatus": null,
+      "expectedRuleId": null,
+      "expectedCollectionPriority": null,
+      "syntheticPreliminarySliceContext": null,
+      "requiredSourceKinds": null,
+      "expectedSliceIds": null
+    },
+    {
+      "id": "P6-ALLOCATION-ANOMALY-REPLAY",
+      "type": "allocation-anomaly-replay",
+      "purpose": "Replay an unrecognised slice context as a data-only laboratory test and confirm that the attribution logic avoids assigning it to either approved slice.",
+      "minimumEvidenceItems": 1,
+      "scenarioIds": null,
+      "expectedDecisionStatus": "ambiguous",
+      "expectedRuleId": "P4-UNRECOGNISED-SNSSAI",
+      "expectedCollectionPriority": null,
+      "syntheticPreliminarySliceContext": {
+        "label": "unrecognised allocation context",
+        "sst": 99,
+        "sd": "FFFFFF",
+        "dnn": "unrecognised"
+      },
+      "requiredSourceKinds": null,
+      "expectedSliceIds": null
+    },
+    {
+      "id": "P6-SHARED-FUNCTION-ISOLATION",
+      "type": "shared-function-isolation",
+      "purpose": "Confirm that shared gNB, core and resource evidence remains explicitly ambiguous instead of being attributed to an unrelated individual slice.",
+      "minimumEvidenceItems": 7,
+      "scenarioIds": [
+        "P2-MULTI-SCENARIO"
+      ],
+      "expectedDecisionStatus": "ambiguous",
+      "expectedRuleId": null,
+      "expectedCollectionPriority": null,
+      "syntheticPreliminarySliceContext": null,
+      "requiredSourceKinds": null,
+      "expectedSliceIds": null
+    },
+    {
+      "id": "P6-CROSS-LAYER-EVIDENCE",
+      "type": "cross-layer-evidence",
+      "purpose": "Confirm that the evidence index retains radio, control-plane, user-plane and resource observations from the shared controlled run.",
+      "minimumEvidenceItems": 4,
+      "scenarioIds": [
+        "P2-MULTI-SCENARIO"
+      ],
+      "expectedDecisionStatus": null,
+      "expectedRuleId": null,
+      "expectedCollectionPriority": null,
+      "syntheticPreliminarySliceContext": null,
+      "requiredSourceKinds": [
+        "radio-access-log",
+        "control-plane-log",
+        "user-plane-log",
+        "resource-metric"
+      ],
+      "expectedSliceIds": null
+    },
+    {
+      "id": "P6-LOAD-TRIGGERED-ADAPTATION",
+      "type": "load-triggered-adaptation",
+      "purpose": "Confirm that the approved traffic observation produces a separate elevated collection-priority update for each labelled slice and records the timing.",
+      "minimumEvidenceItems": 2,
+      "scenarioIds": null,
+      "expectedDecisionStatus": null,
+      "expectedRuleId": "P5-APPROVED-TRAFFIC-PRIORITY",
+      "expectedCollectionPriority": "elevated",
+      "syntheticPreliminarySliceContext": null,
+      "requiredSourceKinds": null,
+      "expectedSliceIds": [
+        "embb",
+        "mmtc"
+      ]
+    }
+  ],
+  "limitations": [
+    "The evaluation runs in an emulated two-slice laboratory. It does not claim live operator or production behaviour.",
+    "The allocation-anomaly case is a data-only evidence replay. It does not transmit rogue radio signals, alter subscriber records or change slice allocation.",
+    "Docker before-and-after snapshots describe total laboratory activity during the controlled run. They do not isolate a causal production cost for the forensic logic.",
+    "The current proof of concept uses labelled controlled traffic and retained artefacts. Results are reproducible within the recorded configuration and workload, not a general performance guarantee for every 5G deployment."
+  ]
+}

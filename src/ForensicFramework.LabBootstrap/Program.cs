@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Globalization;
 using System.Security.Cryptography;
 using System.Text.Json;
 using System.Text.RegularExpressions;
@@ -55,6 +56,18 @@ internal static class Program
                 GetOption(args, "--report"),
                 GetOption(args, "--rule-id"),
                 GetOption(args, "--record-id")),
+            "evaluate-prototype" => WriteEvaluationReport(
+                GetOption(args, "--config") ?? Path.Combine(root, "config", "phase6", "evaluation-scenarios.json"),
+                GetOption(args, "--phase1-run"),
+                GetOption(args, "--phase2-run"),
+                GetOption(args, "--phase3-run"),
+                GetOption(args, "--phase4-run"),
+                GetOption(args, "--phase5-run"),
+                outputPath ?? Path.Combine(root, "artifacts", "phase6-evaluation-report.json")),
+            "query-evaluation" => QueryEvaluation(
+                GetOption(args, "--report"),
+                GetOption(args, "--scenario-id"),
+                GetOption(args, "--metric")),
             "help" or "--help" or "-h" => PrintHelp(),
             _ => Fail($"Unknown command '{command}'. Run 'help' to list supported commands.")
         };
@@ -73,6 +86,8 @@ internal static class Program
         Console.WriteLine("  query-attribution --report <path> [--status <status>] [--rule-id <id>] [--scenario <id>]  Retrieve attribution decisions.");
         Console.WriteLine("  apply-adaptive-collection --attribution-report <path> [--config <path>] [--output <path>]  Apply approved Phase 5 collection rules and create integrity/custody evidence.");
         Console.WriteLine("  query-adaptive-collection --report <path> [--rule-id <id>] [--record-id <id>]  Retrieve Phase 5 rule and custody evidence.");
+        Console.WriteLine("  evaluate-prototype --phase1-run <path> --phase2-run <path> --phase3-run <path> --phase4-run <path> --phase5-run <path> [--config <path>] [--output <path>]  Evaluate all controlled Phase 6 scenarios and measures.");
+        Console.WriteLine("  query-evaluation --report <path> [--scenario-id <id>] [--metric <name>]  Retrieve Phase 6 evaluation results.");
         return 0;
     }
 
@@ -503,6 +518,550 @@ internal static class Program
         Console.WriteLine($"CUSTODY_QUERY_MATCHES {entries.Length}");
         Console.WriteLine(JsonSerializer.Serialize(new { applications, entries }, JsonOptions));
         return applications.Length > 0 || entries.Length > 0 ? 0 : 2;
+    }
+
+    private static int WriteEvaluationReport(
+        string configPath,
+        string? phase1Run,
+        string? phase2Run,
+        string? phase3Run,
+        string? phase4Run,
+        string? phase5Run,
+        string outputPath)
+    {
+        if (string.IsNullOrWhiteSpace(phase1Run) || string.IsNullOrWhiteSpace(phase2Run) ||
+            string.IsNullOrWhiteSpace(phase3Run) || string.IsNullOrWhiteSpace(phase4Run) ||
+            string.IsNullOrWhiteSpace(phase5Run))
+        {
+            return Fail("evaluate-prototype requires --phase1-run, --phase2-run, --phase3-run, --phase4-run and --phase5-run.");
+        }
+
+        if (!File.Exists(configPath)) return Fail($"Evaluation configuration not found: {Path.GetFullPath(configPath)}");
+
+        var stopwatch = Stopwatch.StartNew();
+        EvaluationCatalog? catalog;
+        try
+        {
+            catalog = JsonSerializer.Deserialize<EvaluationCatalog>(File.ReadAllText(configPath), JsonOptions);
+        }
+        catch (JsonException error)
+        {
+            return Fail($"Invalid Phase 6 JSON: {error.Message}");
+        }
+
+        var catalogErrors = ValidateEvaluationCatalog(catalog);
+        if (catalogErrors.Count > 0)
+        {
+            foreach (var error in catalogErrors) Console.Error.WriteLine($"EVALUATION_CONFIG_ERROR {error}");
+            return 1;
+        }
+
+        var phase1Directory = Path.GetFullPath(phase1Run);
+        var phase2Directory = Path.GetFullPath(phase2Run);
+        var phase3Directory = Path.GetFullPath(phase3Run);
+        var phase4Directory = Path.GetFullPath(phase4Run);
+        var phase5Directory = Path.GetFullPath(phase5Run);
+        var phase1SummaryPath = Path.Combine(phase1Directory, "baseline-summary.json");
+        var phase2SummaryPath = Path.Combine(phase2Directory, "phase2-summary.json");
+        var phase3SummaryPath = Path.Combine(phase3Directory, "phase3-summary.json");
+        var evidenceIndexPath = Path.Combine(phase3Directory, "evidence-index.json");
+        var phase4SummaryPath = Path.Combine(phase4Directory, "phase4-summary.json");
+        var attributionReportPath = Path.Combine(phase4Directory, "slice-attribution-report.json");
+        var phase5SummaryPath = Path.Combine(phase5Directory, "phase5-summary.json");
+        var adaptiveReportPath = Path.Combine(phase5Directory, "adaptive-collection-report.json");
+        var beforeStatsPath = Path.Combine(phase2Directory, "docker-stats-before.txt");
+        var afterStatsPath = Path.Combine(phase2Directory, "docker-stats-after.txt");
+        var attributionRulesPath = ResolveSolutionPath("config/phase4/slice-attribution-rules.json");
+
+        var requiredFiles = new[]
+        {
+            phase1SummaryPath, phase2SummaryPath, phase3SummaryPath, evidenceIndexPath,
+            phase4SummaryPath, attributionReportPath, phase5SummaryPath, adaptiveReportPath,
+            beforeStatsPath, afterStatsPath, attributionRulesPath
+        };
+        var missingFiles = requiredFiles.Where(path => !File.Exists(path)).ToArray();
+        if (missingFiles.Length > 0)
+        {
+            foreach (var path in missingFiles) Console.Error.WriteLine($"EVALUATION_INPUT_MISSING {path}");
+            return 1;
+        }
+
+        try
+        {
+            var phase1Summary = DeserializeRequired<Phase1BaselineSummary>(phase1SummaryPath, "Phase 1 baseline summary");
+            var phase2Summary = DeserializeRequired<Phase2TrafficSummary>(phase2SummaryPath, "Phase 2 traffic summary");
+            var phase3Summary = DeserializeRequired<Phase3IngestionSummary>(phase3SummaryPath, "Phase 3 ingestion summary");
+            var evidenceIndex = DeserializeRequired<EvidenceIndex>(evidenceIndexPath, "Phase 3 evidence index");
+            var phase4Summary = DeserializeRequired<Phase4AttributionSummary>(phase4SummaryPath, "Phase 4 attribution summary");
+            var attributionReport = DeserializeRequired<SliceAttributionReport>(attributionReportPath, "Phase 4 attribution report");
+            var phase5Summary = DeserializeRequired<Phase5AdaptiveSummary>(phase5SummaryPath, "Phase 5 adaptive summary");
+            var adaptiveReport = DeserializeRequired<AdaptiveCollectionReport>(adaptiveReportPath, "Phase 5 adaptive report");
+            var attributionCatalog = DeserializeRequired<SliceAttributionCatalog>(attributionRulesPath, "Phase 4 rule catalogue");
+
+            var inputChecks = BuildEvaluationInputChecks(
+                phase1Summary, phase2Summary, phase3Summary, phase4Summary, phase5Summary,
+                attributionReport, adaptiveReport,
+                phase1Directory, phase2Directory, phase3Directory, phase4Directory, phase5Directory,
+                phase1SummaryPath, phase2SummaryPath, phase3SummaryPath, evidenceIndexPath,
+                phase4SummaryPath, attributionReportPath, phase5SummaryPath, adaptiveReportPath);
+
+            if (inputChecks.Any(check => !check.Passed))
+            {
+                foreach (var check in inputChecks.Where(check => !check.Passed))
+                {
+                    Console.Error.WriteLine($"EVALUATION_INPUT_CHECK_FAILED {check.Name}: {check.Detail}");
+                }
+                return 1;
+            }
+
+            var validatedCatalog = catalog!;
+            var scenarios = validatedCatalog.Scenarios!;
+            var normalScenario = GetEvaluationScenario(scenarios, "normal-slice-operation");
+            var anomalyScenario = GetEvaluationScenario(scenarios, "allocation-anomaly-replay");
+            var sharedScenario = GetEvaluationScenario(scenarios, "shared-function-isolation");
+            var crossLayerScenario = GetEvaluationScenario(scenarios, "cross-layer-evidence");
+            var loadScenario = GetEvaluationScenario(scenarios, "load-triggered-adaptation");
+
+            var scenarioResults = new List<EvaluationScenarioResult>
+            {
+                EvaluateNormalSliceOperation(normalScenario, phase2Summary, evidenceIndex, attributionReport),
+                EvaluateAllocationAnomalyReplay(anomalyScenario, attributionCatalog),
+                EvaluateSharedFunctionIsolation(sharedScenario, attributionReport),
+                EvaluateCrossLayerEvidence(crossLayerScenario, evidenceIndex),
+                EvaluateLoadTriggeredAdaptation(loadScenario, adaptiveReport)
+            };
+
+            var normalResult = scenarioResults.Single(result => result.Type == "normal-slice-operation");
+            var overhead = CreateOperationalOverheadObservation(
+                beforeStatsPath, afterStatsPath,
+                CalculateDirectoryBytes(phase3Directory) + CalculateDirectoryBytes(phase4Directory) + CalculateDirectoryBytes(phase5Directory),
+                stopwatch.ElapsedMilliseconds);
+            var metrics = BuildEvaluationMetrics(normalResult, attributionReport, adaptiveReport, overhead);
+            var accepted = scenarioResults.All(result => result.Passed) && metrics.All(metric => metric.Passed);
+            stopwatch.Stop();
+            overhead = overhead with { EvaluationExecutionMilliseconds = stopwatch.ElapsedMilliseconds };
+
+            var report = new PrototypeEvaluationReport(
+                Phase: validatedCatalog.Phase,
+                Purpose: validatedCatalog.Purpose,
+                EvaluatedAtUtc: DateTimeOffset.UtcNow,
+                EvaluationConfigurationPath: Path.GetFullPath(configPath),
+                EvaluationConfigurationSha256: ComputeSha256(configPath),
+                Accepted: accepted,
+                InputChecks: inputChecks,
+                Scenarios: scenarioResults,
+                Metrics: metrics,
+                OperationalOverhead: overhead,
+                Limitations: validatedCatalog.Limitations!,
+                Reproducibility: "The report links a retained Phase 1 baseline, Phase 2 traffic run, Phase 3 index, Phase 4 attribution report and Phase 5 integrity/custody report. Re-running the supplied scripts recreates the same evaluation workflow under the documented laboratory conditions.");
+
+            WriteJson(outputPath, report);
+            Console.WriteLine($"EVALUATION_REPORT_WRITTEN {Path.GetFullPath(outputPath)}");
+            if (!accepted)
+            {
+                return Fail("Phase 6 evaluation acceptance checks did not pass.");
+            }
+
+            Console.WriteLine($"EVALUATION_VALID scenarios={scenarioResults.Count} attribution={attributionReport.KnownGroundTruthAccuracyPercent:F2}% completeness={metrics.Single(metric => metric.Name == "Collection completeness").Value:F2}% integrity={metrics.Single(metric => metric.Name == "Integrity verification").Value:F2}%");
+            return 0;
+        }
+        catch (Exception error) when (error is InvalidOperationException or IOException or JsonException or FormatException)
+        {
+            return Fail($"Phase 6 evaluation failed: {error.Message}");
+        }
+    }
+
+    private static int QueryEvaluation(string? reportPath, string? scenarioId, string? metricName)
+    {
+        if (string.IsNullOrWhiteSpace(reportPath)) return Fail("query-evaluation requires --report <path>.");
+        if (!File.Exists(reportPath)) return Fail($"Evaluation report not found: {Path.GetFullPath(reportPath)}");
+
+        PrototypeEvaluationReport? report;
+        try
+        {
+            report = JsonSerializer.Deserialize<PrototypeEvaluationReport>(File.ReadAllText(reportPath), JsonOptions);
+        }
+        catch (JsonException error)
+        {
+            return Fail($"Invalid evaluation report JSON: {error.Message}");
+        }
+
+        if (report?.Scenarios is null || report.Metrics is null)
+        {
+            return Fail("Evaluation report is empty or incomplete.");
+        }
+
+        var scenarios = report.Scenarios
+            .Where(scenario => string.IsNullOrWhiteSpace(scenarioId) || string.Equals(scenario.Id, scenarioId, StringComparison.OrdinalIgnoreCase))
+            .ToArray();
+        var metrics = report.Metrics
+            .Where(metric => string.IsNullOrWhiteSpace(metricName) || string.Equals(metric.Name, metricName, StringComparison.OrdinalIgnoreCase))
+            .ToArray();
+        Console.WriteLine($"EVALUATION_SCENARIO_QUERY_MATCHES {scenarios.Length}");
+        Console.WriteLine($"EVALUATION_METRIC_QUERY_MATCHES {metrics.Length}");
+        Console.WriteLine(JsonSerializer.Serialize(new { accepted = report.Accepted, scenarios, metrics, overhead = report.OperationalOverhead }, JsonOptions));
+        return scenarios.Length > 0 || metrics.Length > 0 ? 0 : 2;
+    }
+
+    private static T DeserializeRequired<T>(string path, string name)
+    {
+        var value = JsonSerializer.Deserialize<T>(File.ReadAllText(path), JsonOptions);
+        return value ?? throw new InvalidOperationException($"{name} is empty: {path}");
+    }
+
+    private static IReadOnlyList<EvaluationInputCheck> BuildEvaluationInputChecks(
+        Phase1BaselineSummary phase1,
+        Phase2TrafficSummary phase2,
+        Phase3IngestionSummary phase3,
+        Phase4AttributionSummary phase4,
+        Phase5AdaptiveSummary phase5,
+        SliceAttributionReport attributionReport,
+        AdaptiveCollectionReport adaptiveReport,
+        string phase1Directory,
+        string phase2Directory,
+        string phase3Directory,
+        string phase4Directory,
+        string phase5Directory,
+        string phase1SummaryPath,
+        string phase2SummaryPath,
+        string phase3SummaryPath,
+        string evidenceIndexPath,
+        string phase4SummaryPath,
+        string attributionReportPath,
+        string phase5SummaryPath,
+        string adaptiveReportPath)
+    {
+        return
+        [
+            CreateInputCheck("Phase 1 baseline", phase1SummaryPath,
+                string.Equals(phase1.Result, "healthy", StringComparison.OrdinalIgnoreCase),
+                $"Result={phase1.Result}; expected healthy."),
+            CreateInputCheck("Phase 2 controlled traffic", phase2SummaryPath,
+                string.Equals(phase2.Result, "completed", StringComparison.OrdinalIgnoreCase) && phase2.Scenarios?.Length >= 2,
+                $"Result={phase2.Result}; scenarios={phase2.Scenarios?.Length ?? 0}."),
+            CreateInputCheck("Phase 3 evidence ingestion", phase3SummaryPath,
+                string.Equals(phase3.Result, "completed", StringComparison.OrdinalIgnoreCase) && phase3.OriginalArtifactsUnchanged &&
+                string.Equals(Path.GetFullPath(phase3.Phase1InputRun), phase1Directory, StringComparison.OrdinalIgnoreCase) &&
+                string.Equals(Path.GetFullPath(phase3.Phase2InputRun), phase2Directory, StringComparison.OrdinalIgnoreCase),
+                $"Result={phase3.Result}; records={phase3.RecordCount}; originals unchanged={phase3.OriginalArtifactsUnchanged}."),
+            CreateInputCheck("Phase 3 evidence index", evidenceIndexPath,
+                phase3.RecordCount > 0,
+                $"Indexed records={phase3.RecordCount}."),
+            CreateInputCheck("Phase 4 attribution", phase4SummaryPath,
+                string.Equals(phase4.Result, "completed", StringComparison.OrdinalIgnoreCase) && attributionReport.Accepted &&
+                string.Equals(Path.GetFullPath(phase4.Phase3InputRun), phase3Directory, StringComparison.OrdinalIgnoreCase),
+                $"Result={phase4.Result}; accuracy={phase4.KnownGroundTruthAccuracyPercent:F2}%."),
+            CreateInputCheck("Phase 4 attribution report", attributionReportPath,
+                attributionReport.Accepted && attributionReport.DecisionCount == phase4.DecisionCount,
+                $"Accepted={attributionReport.Accepted}; decisions={attributionReport.DecisionCount}."),
+            CreateInputCheck("Phase 5 adaptive collection", phase5SummaryPath,
+                string.Equals(phase5.Result, "completed", StringComparison.OrdinalIgnoreCase) &&
+                string.Equals(Path.GetFullPath(phase5.Phase4InputRun), phase4Directory, StringComparison.OrdinalIgnoreCase),
+                $"Result={phase5.Result}; rule applications={phase5.ApprovedRuleApplicationCount}."),
+            CreateInputCheck("Phase 5 integrity and custody report", adaptiveReportPath,
+                adaptiveReport.Accepted && adaptiveReport.CustodyEntryCount == adaptiveReport.CompleteCustodyEntryCount &&
+                adaptiveReport.CustodyEntryCount == adaptiveReport.VerifiedHashCount,
+                $"Accepted={adaptiveReport.Accepted}; custody={adaptiveReport.CompleteCustodyEntryCount}/{adaptiveReport.CustodyEntryCount}; hashes={adaptiveReport.VerifiedHashCount}."),
+        ];
+    }
+
+    private static EvaluationInputCheck CreateInputCheck(string name, string path, bool passed, string detail) =>
+        new(name, Path.GetFullPath(path), ComputeSha256(path), passed, detail);
+
+    private static EvaluationScenarioDefinition GetEvaluationScenario(IReadOnlyList<EvaluationScenarioDefinition> scenarios, string type) =>
+        scenarios.Single(scenario => string.Equals(scenario.Type, type, StringComparison.OrdinalIgnoreCase));
+
+    private static EvaluationScenarioResult EvaluateNormalSliceOperation(
+        EvaluationScenarioDefinition scenario,
+        Phase2TrafficSummary phase2,
+        EvidenceIndex index,
+        SliceAttributionReport attributionReport)
+    {
+        var scenarioIds = scenario.ScenarioIds!;
+        var expected = scenarioIds.Length * scenario.MinimumEvidenceItems;
+        var presentTrafficScenarios = scenarioIds.Count(id => phase2.Scenarios!.Contains(id, StringComparer.OrdinalIgnoreCase));
+        var observed = 0;
+        var allAttributed = true;
+        foreach (var id in scenarioIds)
+        {
+            var records = index.Records.Where(record => string.Equals(record.ScenarioId, id, StringComparison.OrdinalIgnoreCase)).ToArray();
+            observed += Math.Min(records.Length, scenario.MinimumEvidenceItems);
+            var recordIds = records.Select(record => record.RecordId).ToHashSet(StringComparer.OrdinalIgnoreCase);
+            var decisions = attributionReport.Decisions.Where(decision => recordIds.Contains(decision.RecordId)).ToArray();
+            allAttributed &= records.Length >= scenario.MinimumEvidenceItems && decisions.Length == records.Length &&
+                decisions.All(decision => string.Equals(decision.DecisionStatus, "attributed", StringComparison.OrdinalIgnoreCase));
+        }
+
+        var passed = presentTrafficScenarios == scenarioIds.Length && observed == expected && allAttributed;
+        return new EvaluationScenarioResult(
+            scenario.Id,
+            scenario.Type,
+            scenario.Purpose,
+            passed,
+            expected,
+            observed,
+            $"{presentTrafficScenarios}/{scenarioIds.Length} labelled traffic scenarios completed; all selected records were attributed to their declared slice.",
+            ["phase2-summary.json", "evidence-index.json", "slice-attribution-report.json"]);
+    }
+
+    private static EvaluationScenarioResult EvaluateAllocationAnomalyReplay(
+        EvaluationScenarioDefinition scenario,
+        SliceAttributionCatalog attributionCatalog)
+    {
+        var timestamp = DateTimeOffset.UtcNow;
+        var replayRecord = new NormalisedEvidenceRecord(
+            RecordId: scenario.Id,
+            IngestedAtUtc: timestamp,
+            EvidenceTimestampUtc: timestamp,
+            SourceReference: ResolveSolutionPath("config/phase6/evaluation-scenarios.json"),
+            SourceKind: "allocation-anomaly-replay",
+            SourceComponent: "Phase 6 controlled evidence replay",
+            NetworkFunction: "laboratory-orchestrator",
+            ScenarioId: scenario.Id,
+            PreliminarySliceContext: scenario.SyntheticPreliminarySliceContext,
+            ArtifactSizeBytes: 0,
+            OriginalArtifactUnchanged: true,
+            Observation: "Synthetic, data-only allocation-context anomaly used for evaluation. No radio transmission, subscriber action or slice change occurs.");
+        var decision = AttributeRecord(replayRecord, attributionCatalog, timestamp);
+        var passed = string.Equals(decision.DecisionStatus, scenario.ExpectedDecisionStatus, StringComparison.OrdinalIgnoreCase) &&
+            string.Equals(decision.RuleId, scenario.ExpectedRuleId, StringComparison.OrdinalIgnoreCase) &&
+            decision.AssignedSliceContext is null;
+        return new EvaluationScenarioResult(
+            scenario.Id,
+            scenario.Type,
+            scenario.Purpose,
+            passed,
+            1,
+            1,
+            $"Replay decision={decision.DecisionStatus}; rule={decision.RuleId}; assigned slice={(decision.AssignedSliceContext?.SliceId ?? "none")}.",
+            ["slice-attribution-rules.json", "evaluation-scenarios.json"]);
+    }
+
+    private static EvaluationScenarioResult EvaluateSharedFunctionIsolation(
+        EvaluationScenarioDefinition scenario,
+        SliceAttributionReport attributionReport)
+    {
+        var decisions = attributionReport.Decisions
+            .Where(decision => scenario.ScenarioIds!.Contains(decision.ScenarioId ?? string.Empty, StringComparer.OrdinalIgnoreCase))
+            .ToArray();
+        var observed = decisions.Count(decision =>
+            string.Equals(decision.DecisionStatus, scenario.ExpectedDecisionStatus, StringComparison.OrdinalIgnoreCase) &&
+            decision.AssignedSliceContext is null);
+        var passed = decisions.Length >= scenario.MinimumEvidenceItems && observed == decisions.Length;
+        return new EvaluationScenarioResult(
+            scenario.Id,
+            scenario.Type,
+            scenario.Purpose,
+            passed,
+            scenario.MinimumEvidenceItems,
+            observed,
+            $"{observed}/{decisions.Length} shared records remained {scenario.ExpectedDecisionStatus} with no individual slice assignment.",
+            ["slice-attribution-report.json"]);
+    }
+
+    private static EvaluationScenarioResult EvaluateCrossLayerEvidence(EvaluationScenarioDefinition scenario, EvidenceIndex index)
+    {
+        var requiredSourceKinds = scenario.RequiredSourceKinds ?? throw new InvalidOperationException($"Scenario '{scenario.Id}' has no required source kinds.");
+        var sourceKinds = index.Records
+            .Where(record => scenario.ScenarioIds!.Contains(record.ScenarioId ?? string.Empty, StringComparer.OrdinalIgnoreCase))
+            .Select(record => record.SourceKind)
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var observed = requiredSourceKinds.Count(sourceKind => sourceKinds.Contains(sourceKind));
+        var passed = observed == requiredSourceKinds.Length;
+        return new EvaluationScenarioResult(
+            scenario.Id,
+            scenario.Type,
+            scenario.Purpose,
+            passed,
+            requiredSourceKinds.Length,
+            observed,
+            $"Required cross-layer source kinds present: {string.Join(", ", requiredSourceKinds.Where(sourceKinds.Contains))}.",
+            ["evidence-index.json"]);
+    }
+
+    private static EvaluationScenarioResult EvaluateLoadTriggeredAdaptation(EvaluationScenarioDefinition scenario, AdaptiveCollectionReport adaptiveReport)
+    {
+        var applications = adaptiveReport.RuleApplications
+            .Where(application => string.Equals(application.RuleId, scenario.ExpectedRuleId, StringComparison.OrdinalIgnoreCase))
+            .ToArray();
+        var expectedSlices = scenario.ExpectedSliceIds!;
+        var matchingSlices = expectedSlices.Count(sliceId => applications.Any(application =>
+            string.Equals(application.SliceId, sliceId, StringComparison.OrdinalIgnoreCase) &&
+            string.Equals(application.CollectionPriority, scenario.ExpectedCollectionPriority, StringComparison.OrdinalIgnoreCase)));
+        var passed = applications.Length >= scenario.MinimumEvidenceItems && matchingSlices == expectedSlices.Length;
+        return new EvaluationScenarioResult(
+            scenario.Id,
+            scenario.Type,
+            scenario.Purpose,
+            passed,
+            expectedSlices.Length,
+            matchingSlices,
+            $"{applications.Length} approved rule applications recorded; {matchingSlices}/{expectedSlices.Length} expected slice contexts received {scenario.ExpectedCollectionPriority} collection priority.",
+            ["adaptive-collection-report.json", "adaptation-timing-log.json"]);
+    }
+
+    private static IReadOnlyList<EvaluationMetric> BuildEvaluationMetrics(
+        EvaluationScenarioResult normalResult,
+        SliceAttributionReport attributionReport,
+        AdaptiveCollectionReport adaptiveReport,
+        OperationalOverheadObservation overhead)
+    {
+        var attributionAccuracy = Percentage(attributionReport.KnownGroundTruthCorrectCount, attributionReport.KnownGroundTruthDecisionCount);
+        var collectionCompleteness = Percentage(normalResult.ObservedEvidenceItems, normalResult.ExpectedEvidenceItems);
+        var integrityVerification = Percentage(adaptiveReport.VerifiedHashCount, adaptiveReport.CustodyEntryCount);
+        var custodyCompleteness = Percentage(adaptiveReport.CompleteCustodyEntryCount, adaptiveReport.CustodyEntryCount);
+        return
+        [
+            new EvaluationMetric("Attribution accuracy", "Correctly assigned labelled records divided by labelled ground-truth records.", attributionReport.KnownGroundTruthCorrectCount, attributionReport.KnownGroundTruthDecisionCount, attributionAccuracy, "percent", attributionReport.KnownGroundTruthDecisionCount > 0 && attributionAccuracy == 100, "slice-attribution-report.json"),
+            new EvaluationMetric("Collection completeness", "Collected normal-operation evidence items divided by the predefined items required for the two labelled traffic scenarios.", normalResult.ObservedEvidenceItems, normalResult.ExpectedEvidenceItems, collectionCompleteness, "percent", normalResult.Passed && collectionCompleteness == 100, "evidence-index.json and scenario ledger"),
+            new EvaluationMetric("Integrity verification", "Recomputed SHA-256 values that match the stored value divided by hashed custody entries.", adaptiveReport.VerifiedHashCount, adaptiveReport.CustodyEntryCount, integrityVerification, "percent", adaptiveReport.CustodyEntryCount > 0 && integrityVerification == 100, "hash-verification-report.json"),
+            new EvaluationMetric("Adaptation latency", "Maximum elapsed time from an approved observed traffic event to the matching collection-priority update.", adaptiveReport.TriggerToRuleUpdateLatencyMilliseconds, 1, adaptiveReport.TriggerToRuleUpdateLatencyMilliseconds, "milliseconds", adaptiveReport.ApprovedRuleApplicationCount > 0, "adaptation-timing-log.json"),
+            new EvaluationMetric("Custody completeness", "Custody entries containing all required source, collector, action, timestamp, hash and storage fields divided by all custody entries.", adaptiveReport.CompleteCustodyEntryCount, adaptiveReport.CustodyEntryCount, custodyCompleteness, "percent", adaptiveReport.CustodyEntryCount > 0 && custodyCompleteness == 100, "custody-ledger.json"),
+            new EvaluationMetric("Operational overhead", "Change in total Docker CPU percentage across the 13 controlled laboratory containers between the before and after traffic snapshots. The separate overhead observation reports memory, network, block-write and retained-evidence figures; it does not claim an isolated production cost for the forensic logic.", overhead.CpuPercentDelta, 1, overhead.CpuPercentDelta, "CPU percentage points", overhead.BeforeContainerCount > 0 && overhead.AfterContainerCount > 0, "docker-stats-before.txt, docker-stats-after.txt and operational-overhead.json")
+        ];
+    }
+
+    private static double Percentage(long numerator, long denominator) => denominator == 0 ? 0 : Math.Round(numerator * 100.0 / denominator, 2);
+
+    private static OperationalOverheadObservation CreateOperationalOverheadObservation(
+        string beforeStatsPath,
+        string afterStatsPath,
+        long evidenceRepositoryBytes,
+        long evaluationExecutionMilliseconds)
+    {
+        var before = ParseDockerStatsSnapshot(beforeStatsPath);
+        var after = ParseDockerStatsSnapshot(afterStatsPath);
+        return new OperationalOverheadObservation(
+            BeforeContainerCount: before.ContainerCount,
+            AfterContainerCount: after.ContainerCount,
+            CpuPercentBefore: before.TotalCpuPercent,
+            CpuPercentAfter: after.TotalCpuPercent,
+            CpuPercentDelta: Math.Round(after.TotalCpuPercent - before.TotalCpuPercent, 2),
+            MemoryMiBBefore: before.TotalMemoryMiB,
+            MemoryMiBAfter: after.TotalMemoryMiB,
+            MemoryMiBDelta: Math.Round(after.TotalMemoryMiB - before.TotalMemoryMiB, 2),
+            NetworkBytesBefore: before.TotalNetworkBytes,
+            NetworkBytesAfter: after.TotalNetworkBytes,
+            NetworkBytesDelta: after.TotalNetworkBytes - before.TotalNetworkBytes,
+            BlockWriteBytesBefore: before.TotalBlockWriteBytes,
+            BlockWriteBytesAfter: after.TotalBlockWriteBytes,
+            BlockWriteBytesDelta: after.TotalBlockWriteBytes - before.TotalBlockWriteBytes,
+            EvidenceRepositoryBytes: evidenceRepositoryBytes,
+            EvaluationExecutionMilliseconds: evaluationExecutionMilliseconds,
+            Interpretation: "The before and after Docker snapshots show the total controlled-laboratory activity during the traffic run. They support an overhead observation but do not isolate a causal production cost of the forensic logic.");
+    }
+
+    private static DockerStatsSnapshot ParseDockerStatsSnapshot(string path)
+    {
+        var entries = new List<DockerStatsEntry>();
+        foreach (var line in File.ReadLines(path).Skip(1).Where(line => !string.IsNullOrWhiteSpace(line)))
+        {
+            var columns = Regex.Split(line.Trim(), @"\s{2,}");
+            if (columns.Length < 8)
+            {
+                throw new FormatException($"Unexpected Docker stats row in {path}: {line}");
+            }
+
+            var memoryParts = columns[3].Split('/', StringSplitOptions.TrimEntries);
+            var networkParts = columns[5].Split('/', StringSplitOptions.TrimEntries);
+            var blockParts = columns[6].Split('/', StringSplitOptions.TrimEntries);
+            if (memoryParts.Length != 2 || networkParts.Length != 2 || blockParts.Length != 2)
+            {
+                throw new FormatException($"Unexpected Docker stats measurement in {path}: {line}");
+            }
+
+            entries.Add(new DockerStatsEntry(
+                columns[1],
+                ParseDecimal(columns[2].Trim().TrimEnd('%')),
+                ParseDockerBytes(memoryParts[0]),
+                ParseDockerBytes(networkParts[0]) + ParseDockerBytes(networkParts[1]),
+                ParseDockerBytes(blockParts[1])));
+        }
+
+        if (entries.Count == 0) throw new FormatException($"No Docker statistics were found in {path}.");
+        return new DockerStatsSnapshot(
+            Path.GetFullPath(path),
+            entries.Count,
+            Math.Round(entries.Sum(entry => entry.CpuPercent), 2),
+            Math.Round(entries.Sum(entry => entry.MemoryBytes) / 1024.0 / 1024.0, 2),
+            entries.Sum(entry => entry.NetworkBytes),
+            entries.Sum(entry => entry.BlockWriteBytes));
+    }
+
+    private static double ParseDecimal(string text) =>
+        double.Parse(text.Replace(',', '.'), NumberStyles.Float, CultureInfo.InvariantCulture);
+
+    private static long ParseDockerBytes(string value)
+    {
+        var match = Regex.Match(value.Trim(), @"^(?<number>[0-9]+(?:[\.,][0-9]+)?)\s*(?<unit>B|kB|KB|MB|GB|TB|KiB|MiB|GiB|TiB)$", RegexOptions.IgnoreCase);
+        if (!match.Success) throw new FormatException($"Unsupported Docker size '{value}'.");
+        var number = ParseDecimal(match.Groups["number"].Value);
+        var multiplier = match.Groups["unit"].Value.ToUpperInvariant() switch
+        {
+            "B" => 1d,
+            "KB" => 1_000d,
+            "MB" => 1_000_000d,
+            "GB" => 1_000_000_000d,
+            "TB" => 1_000_000_000_000d,
+            "KIB" => 1_024d,
+            "MIB" => 1_048_576d,
+            "GIB" => 1_073_741_824d,
+            "TIB" => 1_099_511_627_776d,
+            _ => throw new FormatException($"Unsupported Docker size unit in '{value}'.")
+        };
+        return checked((long)Math.Round(number * multiplier, MidpointRounding.AwayFromZero));
+    }
+
+    private static long CalculateDirectoryBytes(string directory) =>
+        Directory.GetFiles(directory, "*", SearchOption.AllDirectories).Sum(path => new FileInfo(path).Length);
+
+    private static IReadOnlyList<string> ValidateEvaluationCatalog(EvaluationCatalog? catalog)
+    {
+        var errors = new List<string>();
+        if (catalog is null)
+        {
+            errors.Add("Evaluation configuration is empty.");
+            return errors;
+        }
+
+        if (string.IsNullOrWhiteSpace(catalog.Phase)) errors.Add("phase is required.");
+        if (string.IsNullOrWhiteSpace(catalog.Purpose)) errors.Add("purpose is required.");
+        if (catalog.Scenarios is null || catalog.Scenarios.Length != 5) errors.Add("Exactly five controlled evaluation scenarios are required.");
+        if (catalog.Limitations is null || catalog.Limitations.Length == 0) errors.Add("At least one evaluation limitation is required.");
+        var requiredTypes = new[] { "normal-slice-operation", "allocation-anomaly-replay", "shared-function-isolation", "cross-layer-evidence", "load-triggered-adaptation" };
+        var scenarioTypes = catalog.Scenarios?.Select(scenario => scenario.Type).ToHashSet(StringComparer.OrdinalIgnoreCase) ?? new HashSet<string>();
+        foreach (var type in requiredTypes)
+        {
+            if (!scenarioTypes.Contains(type)) errors.Add($"Missing required evaluation scenario type '{type}'.");
+        }
+
+        var ids = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var scenario in catalog.Scenarios ?? [])
+        {
+            if (string.IsNullOrWhiteSpace(scenario.Id)) errors.Add("Each evaluation scenario requires an id.");
+            else if (!ids.Add(scenario.Id)) errors.Add($"Duplicate evaluation scenario id: {scenario.Id}.");
+            if (string.IsNullOrWhiteSpace(scenario.Type)) errors.Add($"Scenario '{scenario.Id}' requires a type.");
+            if (string.IsNullOrWhiteSpace(scenario.Purpose)) errors.Add($"Scenario '{scenario.Id}' requires a purpose.");
+            if (scenario.MinimumEvidenceItems <= 0) errors.Add($"Scenario '{scenario.Id}' requires a positive minimumEvidenceItems value.");
+            if (scenario.Type is "normal-slice-operation" or "shared-function-isolation" or "cross-layer-evidence")
+            {
+                if (scenario.ScenarioIds is null || scenario.ScenarioIds.Length == 0) errors.Add($"Scenario '{scenario.Id}' requires scenarioIds.");
+            }
+            if (scenario.Type == "allocation-anomaly-replay")
+            {
+                if (!HasCompleteSliceContext(scenario.SyntheticPreliminarySliceContext)) errors.Add($"Scenario '{scenario.Id}' requires a complete syntheticPreliminarySliceContext.");
+                if (string.IsNullOrWhiteSpace(scenario.ExpectedDecisionStatus) || string.IsNullOrWhiteSpace(scenario.ExpectedRuleId)) errors.Add($"Scenario '{scenario.Id}' requires expected decision status and rule id.");
+            }
+            if (scenario.Type == "shared-function-isolation" && string.IsNullOrWhiteSpace(scenario.ExpectedDecisionStatus)) errors.Add($"Scenario '{scenario.Id}' requires expectedDecisionStatus.");
+            if (scenario.Type == "cross-layer-evidence" && (scenario.RequiredSourceKinds is null || scenario.RequiredSourceKinds.Length == 0)) errors.Add($"Scenario '{scenario.Id}' requires requiredSourceKinds.");
+            if (scenario.Type == "load-triggered-adaptation")
+            {
+                if (string.IsNullOrWhiteSpace(scenario.ExpectedRuleId) || string.IsNullOrWhiteSpace(scenario.ExpectedCollectionPriority)) errors.Add($"Scenario '{scenario.Id}' requires an expected rule id and collection priority.");
+                if (scenario.ExpectedSliceIds is null || scenario.ExpectedSliceIds.Length == 0) errors.Add($"Scenario '{scenario.Id}' requires expectedSliceIds.");
+            }
+        }
+
+        return errors;
     }
 
     private static IReadOnlyList<string> ValidateAdaptiveCollectionCatalog(AdaptiveCollectionCatalog? catalog)
@@ -1410,6 +1969,128 @@ internal static class Program
         IReadOnlyList<AdaptiveRuleApplication> RuleApplications,
         IReadOnlyList<CustodyEntry> CustodyLedger,
         IReadOnlyList<HashVerificationResult> HashVerificationResults);
+
+    private sealed record EvaluationCatalog(
+        string Phase,
+        string Purpose,
+        EvaluationScenarioDefinition[] Scenarios,
+        string[] Limitations);
+
+    private sealed record EvaluationScenarioDefinition(
+        string Id,
+        string Type,
+        string Purpose,
+        int MinimumEvidenceItems,
+        string[]? ScenarioIds,
+        string? ExpectedDecisionStatus,
+        string? ExpectedRuleId,
+        string? ExpectedCollectionPriority,
+        PreliminarySliceContext? SyntheticPreliminarySliceContext,
+        string[]? RequiredSourceKinds,
+        string[]? ExpectedSliceIds);
+
+    private sealed record Phase1BaselineSummary(string Result, string[] ExpectedContainers);
+
+    private sealed record Phase2TrafficSummary(string Result, string[] Scenarios, string[] RanContainers);
+
+    private sealed record Phase3IngestionSummary(
+        string Result,
+        string Phase1InputRun,
+        string Phase2InputRun,
+        int RecordCount,
+        bool OriginalArtifactsUnchanged);
+
+    private sealed record Phase4AttributionSummary(
+        string Result,
+        string Phase3InputRun,
+        int DecisionCount,
+        int KnownGroundTruthDecisionCount,
+        int KnownGroundTruthCorrectCount,
+        double KnownGroundTruthAccuracyPercent);
+
+    private sealed record Phase5AdaptiveSummary(
+        string Result,
+        string Phase4InputRun,
+        int ApprovedRuleApplicationCount,
+        int CustodyEntryCount,
+        int CompleteCustodyEntryCount,
+        int VerifiedHashCount,
+        long TriggerToRuleUpdateLatencyMilliseconds);
+
+    private sealed record EvaluationInputCheck(
+        string Name,
+        string Path,
+        string Sha256,
+        bool Passed,
+        string Detail);
+
+    private sealed record EvaluationScenarioResult(
+        string Id,
+        string Type,
+        string Purpose,
+        bool Passed,
+        int ExpectedEvidenceItems,
+        int ObservedEvidenceItems,
+        string ResultSummary,
+        IReadOnlyList<string> EvidenceReferences);
+
+    private sealed record EvaluationMetric(
+        string Name,
+        string OperationalDefinition,
+        double Numerator,
+        double Denominator,
+        double Value,
+        string Unit,
+        bool Passed,
+        string VerificationArtifact);
+
+    private sealed record DockerStatsEntry(
+        string Name,
+        double CpuPercent,
+        long MemoryBytes,
+        long NetworkBytes,
+        long BlockWriteBytes);
+
+    private sealed record DockerStatsSnapshot(
+        string SourcePath,
+        int ContainerCount,
+        double TotalCpuPercent,
+        double TotalMemoryMiB,
+        long TotalNetworkBytes,
+        long TotalBlockWriteBytes);
+
+    private sealed record OperationalOverheadObservation(
+        int BeforeContainerCount,
+        int AfterContainerCount,
+        double CpuPercentBefore,
+        double CpuPercentAfter,
+        double CpuPercentDelta,
+        double MemoryMiBBefore,
+        double MemoryMiBAfter,
+        double MemoryMiBDelta,
+        long NetworkBytesBefore,
+        long NetworkBytesAfter,
+        long NetworkBytesDelta,
+        long BlockWriteBytesBefore,
+        long BlockWriteBytesAfter,
+        long BlockWriteBytesDelta,
+        long EvidenceRepositoryBytes,
+        long EvaluationExecutionMilliseconds,
+        string Interpretation);
+
+    private sealed record PrototypeEvaluationReport(
+        string Phase,
+        string Purpose,
+        DateTimeOffset EvaluatedAtUtc,
+        string EvaluationConfigurationPath,
+        string EvaluationConfigurationSha256,
+        bool Accepted,
+        IReadOnlyList<EvaluationInputCheck> InputChecks,
+        IReadOnlyList<EvaluationScenarioResult> Scenarios,
+        IReadOnlyList<EvaluationMetric> Metrics,
+        OperationalOverheadObservation OperationalOverhead,
+        IReadOnlyList<string> Limitations,
+        string Reproducibility);
 
     private sealed record ReadinessCheck(string Name, bool Passed, string Summary);
 
