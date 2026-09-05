@@ -2,7 +2,7 @@
 
 This repository contains a research proof of concept for collecting, organising, attributing, protecting and evaluating forensic evidence in a small emulated 5G network. It is designed for a Windows computer running Docker Desktop. It does not use physical radio equipment, a live operator network or real subscriber data.
 
-An external examiner can reproduce the prototype by following the steps below in order. The prototype starts a two-slice OpenAirInterface laboratory, generates controlled traffic, registers the retained evidence, explains each slice decision, records integrity and custody information, and evaluates the completed workflow against predefined scenarios.
+The prototype can be reproduced by following the steps below in order. The prototype starts a two-slice OpenAirInterface laboratory, generates controlled traffic, registers the retained evidence, explains each slice decision, records integrity and custody information, and evaluates the completed workflow against predefined scenarios.
 
 ## What the prototype demonstrates
 
